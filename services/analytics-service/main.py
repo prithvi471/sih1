@@ -55,6 +55,84 @@ def get_db_connection():
     )
 
 
+# ---------------------------------------------------------------------------
+# Neo4j knowledge graph: Subsidiary–operates–Mine, Document–about–Mine, etc.
+# ---------------------------------------------------------------------------
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "mineiq_graph_pass")
+_neo_driver = None
+
+
+def get_graph():
+    global _neo_driver
+    if _neo_driver is not None:
+        return _neo_driver
+    try:
+        from neo4j import GraphDatabase
+        drv = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        drv.verify_connectivity()
+        _neo_driver = drv
+        logger.info("Neo4j knowledge graph connected.")
+    except Exception as e:
+        logger.warning(f"Neo4j unavailable: {e}")
+        _neo_driver = None
+    return _neo_driver
+
+
+def graph_sync():
+    """(Re)build the knowledge graph from PostgreSQL. Idempotent via MERGE."""
+    drv = get_graph()
+    if not drv:
+        return {"error": "neo4j_unavailable"}
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, original_filename, subsidiary, doc_type, topic_area FROM documents WHERE status != 'failed';")
+            docs = cur.fetchall()
+            cur.execute("SELECT DISTINCT mine_name, subsidiary FROM structured_data WHERE mine_name IS NOT NULL AND subsidiary IS NOT NULL;")
+            mines = cur.fetchall()
+            cur.execute("SELECT document_id, mine_name, subsidiary FROM structured_data WHERE mine_name IS NOT NULL;")
+            doc_mine = cur.fetchall()
+            try:
+                cur.execute("SELECT id, pq_number, subsidiaries, topics FROM parliamentary_questions;")
+                pqs = cur.fetchall()
+            except Exception:
+                pqs = []
+    finally:
+        conn.close()
+
+    counts = {"subsidiaries": 0, "mines": 0, "documents": 0, "pqs": 0}
+    with drv.session() as s:
+        for m in mines:
+            s.run("MERGE (sub:Subsidiary {name:$sub}) "
+                  "MERGE (mine:Mine {name:$mine, subsidiary:$sub}) "
+                  "MERGE (sub)-[:OPERATES]->(mine)",
+                  sub=m["subsidiary"].upper(), mine=m["mine_name"])
+            counts["mines"] += 1
+        subs = {m["subsidiary"].upper() for m in mines} | {d["subsidiary"].upper() for d in docs if d.get("subsidiary")}
+        counts["subsidiaries"] = len(subs)
+        for d in docs:
+            sub = (d.get("subsidiary") or "").upper()
+            s.run("MERGE (doc:Document {id:$id}) SET doc.filename=$fn, doc.doc_type=$dt", id=str(d["id"]), fn=d["original_filename"], dt=d.get("doc_type"))
+            if sub:
+                s.run("MERGE (sub:Subsidiary {name:$sub}) WITH sub MATCH (doc:Document {id:$id}) MERGE (doc)-[:BELONGS_TO]->(sub)", sub=sub, id=str(d["id"]))
+            if d.get("topic_area"):
+                s.run("MERGE (t:Topic {name:$t}) WITH t MATCH (doc:Document {id:$id}) MERGE (doc)-[:HAS_TOPIC]->(t)", t=d["topic_area"], id=str(d["id"]))
+            counts["documents"] += 1
+        for dm in doc_mine:
+            s.run("MATCH (doc:Document {id:$id}) MATCH (mine:Mine {name:$mine, subsidiary:$sub}) MERGE (doc)-[:ABOUT]->(mine)",
+                  id=str(dm["document_id"]), mine=dm["mine_name"], sub=(dm["subsidiary"] or "").upper())
+        for q in pqs:
+            s.run("MERGE (pq:PQ {id:$id}) SET pq.number=$num", id=str(q["id"]), num=q.get("pq_number"))
+            for sub in (q.get("subsidiaries") or []):
+                s.run("MERGE (sub:Subsidiary {name:$sub}) WITH sub MATCH (pq:PQ {id:$id}) MERGE (pq)-[:CONCERNS]->(sub)", sub=sub.upper(), id=str(q["id"]))
+            for t in (q.get("topics") or []):
+                s.run("MERGE (t:Topic {name:$t}) WITH t MATCH (pq:PQ {id:$id}) MERGE (pq)-[:RELATED_TO]->(t)", t=t, id=str(q["id"]))
+            counts["pqs"] += 1
+    return counts
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -329,3 +407,63 @@ def get_topic_trends(
         return {"insufficient_data": False, "trends": trend_list}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph API
+# ---------------------------------------------------------------------------
+_GRAPH_ADMIN = ("ADMIN", "MINISTRY_OFFICER", "CMPDI_OFFICER")
+
+
+@app.post("/graph/sync")
+def graph_sync_endpoint(authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
+    if user.get("role") not in _GRAPH_ADMIN:
+        raise HTTPException(status_code=403, detail="Not authorized to rebuild the knowledge graph")
+    logger.info(f"Graph sync requested by '{user['username']}'")
+    result = graph_sync()
+    if "error" in result:
+        raise HTTPException(status_code=503, detail="Neo4j knowledge graph is unavailable")
+    return {"status": "synced", **result}
+
+
+@app.get("/graph/overview")
+def graph_overview(authorization: Optional[str] = Header(None)):
+    """Subsidiary -> mines / document counts, RBAC-filtered to the caller's scope."""
+    user = get_current_user(authorization)
+    drv = get_graph()
+    if not drv:
+        raise HTTPException(status_code=503, detail="Neo4j knowledge graph is unavailable")
+    with drv.session() as s:
+        totals = s.run("MATCH (n) RETURN count(n) AS nodes").single()["nodes"]
+        rels = s.run("MATCH ()-[r]->() RETURN count(r) AS rels").single()["rels"]
+        rows = s.run(
+            """
+            MATCH (sub:Subsidiary)
+            OPTIONAL MATCH (sub)-[:OPERATES]->(m:Mine)
+            OPTIONAL MATCH (d:Document)-[:BELONGS_TO]->(sub)
+            RETURN sub.name AS subsidiary, count(DISTINCT m) AS mines, count(DISTINCT d) AS documents
+            ORDER BY subsidiary
+            """
+        ).data()
+    subs = [r for r in rows if verify_document_access(user, r["subsidiary"])]
+    return {"nodes": totals, "relationships": rels, "subsidiaries": subs,
+            "authorized_scope": user.get("assigned_subsidiary") or "ALL"}
+
+
+@app.get("/graph/subsidiary/{name}")
+def graph_subsidiary(name: str, authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
+    if not verify_document_access(user, name.upper()):
+        raise HTTPException(status_code=403, detail=f"Not authorized for subsidiary '{name}'")
+    drv = get_graph()
+    if not drv:
+        raise HTTPException(status_code=503, detail="Neo4j knowledge graph is unavailable")
+    with drv.session() as s:
+        mines = s.run("MATCH (sub:Subsidiary {name:$n})-[:OPERATES]->(m:Mine) RETURN m.name AS name ORDER BY name",
+                      n=name.upper()).value()
+        docs = s.run("MATCH (d:Document)-[:BELONGS_TO]->(sub:Subsidiary {name:$n}) RETURN d.filename AS filename, d.doc_type AS doc_type ORDER BY filename",
+                     n=name.upper()).data()
+        topics = s.run("MATCH (d:Document)-[:BELONGS_TO]->(sub:Subsidiary {name:$n}) MATCH (d)-[:HAS_TOPIC]->(t:Topic) RETURN DISTINCT t.name AS topic",
+                       n=name.upper()).value()
+    return {"subsidiary": name.upper(), "mines": mines, "documents": docs, "topics": topics}
