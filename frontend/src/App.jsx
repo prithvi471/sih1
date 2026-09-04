@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   FileText, Upload, Database, Shield, Search, Sparkles, BarChart3,
   RefreshCw, AlertTriangle, CheckCircle2, Download, ArrowLeft, Layers,
-  MessageSquare, Activity, ChevronRight, Users, Trash2, Plus
+  MessageSquare, Activity, ChevronRight, Users, Trash2, Plus, LogOut, Lock
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -86,8 +86,12 @@ function StatusBadge({ status }) {
 
 export default function App() {
   const [tab, setTab] = useState('overview');
-  const [user, setUser] = useState(DEMO_USERS[0]);
+  const [user, setUser] = useState(null);
   const [token, setToken] = useState('');
+  const [authed, setAuthed] = useState(false);
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [loginError, setLoginError] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
 
   const [documents, setDocuments] = useState([]);
   const [metrics, setMetrics] = useState(null);
@@ -115,24 +119,33 @@ export default function App() {
   const [ragLoading, setRagLoading] = useState(false);
   const [ragScope, setRagScope] = useState('CROSS_DOCUMENT');
 
-  useEffect(() => { login(user.username); }, []);
-
   const authHeaders = (t) => ({ Authorization: `Bearer ${t || token}` });
 
-  async function login(username) {
-    const u = DEMO_USERS.find((x) => x.username === username) || DEMO_USERS[0];
-    setUser(u);
+  async function doLogin(username, password) {
+    setLoginError(''); setLoginBusy(true);
     try {
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: u.username, password: u.pw }),
+        body: JSON.stringify({ username, password }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setToken(data.access_token);
-        loadAll(data.access_token);
-      }
-    } catch (e) { console.warn('login failed', e); }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setLoginError(data.detail || 'Invalid username or password'); return; }
+      const u = {
+        username: data.user.username, role: data.user.role,
+        sub: data.user.assigned_subsidiary, name: data.user.full_name,
+      };
+      setToken(data.access_token); setUser(u); setAuthed(true); setTab('overview');
+      loadAll(data.access_token);
+    } catch (e) {
+      setLoginError('Cannot reach the server. Is the API running on :8000?');
+    } finally { setLoginBusy(false); }
+  }
+
+  function logout() {
+    setAuthed(false); setToken(''); setUser(null);
+    setDocuments([]); setUsers([]); setSelectedDoc(null); setSelectedReport(null);
+    setMetrics(null); setAuditLogs([]); setDiscrepancies(null);
+    setLoginForm({ username: '', password: '' }); setLoginError('');
   }
 
   function loadAll(t) {
@@ -246,6 +259,53 @@ export default function App() {
     ? (metrics.extraction_accuracy_evaluated ? pct(metrics.extraction_accuracy_percentage) : 'Not evaluated')
     : '—';
 
+  // ---- Login screen ----
+  if (!authed) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+        <div style={{ width: '100%', maxWidth: 400 }}>
+          <div className="row" style={{ gap: 11, justifyContent: 'center', marginBottom: 20 }}>
+            <div className="brand-mark"><Layers size={19} /></div>
+            <div>
+              <div className="brand-title">MineIQ</div>
+              <div className="small muted">CIL / CMPDI Document Intelligence</div>
+            </div>
+          </div>
+          <div className="card card-pad-lg">
+            <div className="section-title" style={{ marginBottom: 14 }}>Sign in</div>
+            <form onSubmit={e => { e.preventDefault(); doLogin(loginForm.username.trim(), loginForm.password); }}>
+              <div className="stack" style={{ gap: 10 }}>
+                <input className="input" placeholder="Username" autoFocus value={loginForm.username}
+                  onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} />
+                <input className="input" type="password" placeholder="Password" value={loginForm.password}
+                  onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} />
+                <button className="btn btn-primary" type="submit" disabled={loginBusy || !loginForm.username || !loginForm.password}>
+                  {loginBusy ? <RefreshCw size={15} className="spin" /> : <Lock size={15} />} Sign in
+                </button>
+              </div>
+            </form>
+            {loginError && <div className="small" style={{ color: 'var(--red)', marginTop: 10 }}>{loginError}</div>}
+
+            <div style={{ borderTop: '1px solid var(--border)', margin: '18px 0 14px' }} />
+            <div className="small muted" style={{ marginBottom: 10 }}>Or sign in with a demo role</div>
+            <div className="stack" style={{ gap: 7 }}>
+              {DEMO_USERS.map(u => (
+                <button key={u.username} className="btn btn-ghost" style={{ justifyContent: 'space-between' }}
+                  disabled={loginBusy} onClick={() => doLogin(u.username, u.pw)}>
+                  <span>{u.name}</span>
+                  <span className="badge badge-accent">{u.role}{u.sub ? ` · ${u.sub}` : ''}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="small faint" style={{ textAlign: 'center', marginTop: 14 }}>
+            Access is scoped by role. Subsidiary officers see only their own data.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       {/* Header */}
@@ -260,10 +320,12 @@ export default function App() {
               </div>
             </div>
             <div className="row" style={{ gap: 10 }}>
-              <select className="select" style={{ width: 'auto' }} value={user.username} onChange={e => login(e.target.value)}>
-                {DEMO_USERS.map(u => <option key={u.username} value={u.username}>{u.name}</option>)}
-              </select>
-              <span className="badge badge-accent">{user.role}{user.sub ? ` · ${user.sub}` : ''}</span>
+              <div style={{ textAlign: 'right' }}>
+                <div className="small" style={{ fontWeight: 560 }}>{user?.name}</div>
+                <div className="small faint">{user?.role}{user?.sub ? ` · ${user.sub}` : ''}</div>
+              </div>
+              <span className="badge badge-accent">{user?.role}{user?.sub ? ` · ${user.sub}` : ''}</span>
+              <button className="btn btn-ghost btn-sm" onClick={logout}><LogOut size={14} /> Sign out</button>
             </div>
           </div>
           <nav className="nav">
