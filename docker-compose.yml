@@ -141,6 +141,10 @@ services:
     container_name: mineiq-ollama
     ports:
       - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      # Keep the model resident in memory so there is no cold-start latency
+      # between requests (important for a smooth live demo).
+      OLLAMA_KEEP_ALIVE: "-1"
     volumes:
       - ollama_data:/root/.ollama
 

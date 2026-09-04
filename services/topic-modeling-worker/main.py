@@ -26,7 +26,8 @@ RAG_SERVICE_URL = os.getenv("RAG_SERVICE_URL", "http://rag-service:8000")
 OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "http://ollama:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 
-MAIN_QUEUE = "document.classified"
+CLASSIFIED_EXCHANGE = "document.classified.fanout"
+MAIN_QUEUE = "document.classified.topic"   # own queue on the fanout
 
 
 def ensure_schema(conn):
@@ -174,16 +175,10 @@ def run_worker():
             connection = pika.BlockingConnection(parameters)
             channel = connection.channel()
 
-            channel.queue_declare(
-                queue=MAIN_QUEUE, 
-                durable=True,
-                arguments={
-                    'x-dead-letter-exchange': '',
-                    'x-dead-letter-routing-key': 'document.classified.dlq'
-                }
-            )
+            channel.exchange_declare(exchange=CLASSIFIED_EXCHANGE, exchange_type="fanout", durable=True)
+            channel.queue_declare(queue=MAIN_QUEUE, durable=True)
+            channel.queue_bind(exchange=CLASSIFIED_EXCHANGE, queue=MAIN_QUEUE)
             channel.basic_qos(prefetch_count=1)
-            # Use passive consume so it shares the queue with report generator
             channel.basic_consume(queue=MAIN_QUEUE, on_message_callback=process_message, auto_ack=True)
 
             logger.info(f"Topic modeling worker listening on queue '{MAIN_QUEUE}'...")

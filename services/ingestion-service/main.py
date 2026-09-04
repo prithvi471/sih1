@@ -274,6 +274,11 @@ def get_s3_client():
     )
 
 
+# Fanout exchange so every worker (report / triage / topic) receives every
+# classified event on its own queue, instead of competing for one shared queue.
+CLASSIFIED_EXCHANGE = "document.classified.fanout"
+
+
 def publish_to_rabbitmq(queue_name: str, payload: dict):
     try:
         credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
@@ -284,26 +289,15 @@ def publish_to_rabbitmq(queue_name: str, payload: dict):
         )
         connection = pika.BlockingConnection(parameters)
         channel = connection.channel()
-        # Declare with the same dead-letter arguments used by every consumer
-        # (classification/report/topic/triage workers). RabbitMQ rejects a
-        # redeclare with inequivalent args (406 PRECONDITION_FAILED), so these
-        # must stay identical across all services that touch this queue.
-        channel.queue_declare(
-            queue=queue_name,
-            durable=True,
-            arguments={
-                "x-dead-letter-exchange": "",
-                "x-dead-letter-routing-key": "document.classified.dlq",
-            },
-        )
+        channel.exchange_declare(exchange=CLASSIFIED_EXCHANGE, exchange_type="fanout", durable=True)
         channel.basic_publish(
-            exchange='',
-            routing_key=queue_name,
+            exchange=CLASSIFIED_EXCHANGE,
+            routing_key='',
             body=json.dumps(payload),
             properties=pika.BasicProperties(delivery_mode=2)
         )
         connection.close()
-        logger.info(f"Published message to RabbitMQ queue '{queue_name}' for doc_id={payload.get('document_id')}")
+        logger.info(f"Published classified event to fanout '{CLASSIFIED_EXCHANGE}' for doc_id={payload.get('document_id')}")
     except Exception as e:
         logger.error(f"Failed to publish RabbitMQ message: {str(e)}")
         raise

@@ -357,24 +357,10 @@ async def classify_document(payload: ClassifyRequest):
             )
             conn.commit()
 
-            # 4. Publish classified event to RabbitMQ
-            try:
-                publish_classified_event(
-                    document_id=str(payload.document_id),
-                    doc_type=doc_type,
-                    subsidiary=subsidiary,
-                    topic_area=topic_area,
-                    urgency=urgency
-                )
-            except Exception as rabbit_err:
-                logger.error(
-                    f"RabbitMQ publish failed for {payload.document_id}: {rabbit_err}",
-                    exc_info=True
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Classification saved but RabbitMQ publish failed: {rabbit_err}"
-                )
+            # Note: the classified event is published by the ingestion
+            # orchestrator (single publisher) to the fanout exchange, so this
+            # service no longer publishes — avoids duplicate events and the
+            # earlier "publish failed -> 503" pipeline break.
 
             return ClassifyResponse(
                 document_id=payload.document_id,

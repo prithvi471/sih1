@@ -24,8 +24,9 @@ RABBITMQ_PASS = os.getenv("RABBITMQ_DEFAULT_PASS", os.getenv("RABBITMQ_PASS", "m
 OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "http://ollama:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 
-MAIN_QUEUE = "document.classified"
-DLQ_QUEUE = "document.classified.dlq"
+CLASSIFIED_EXCHANGE = "document.classified.fanout"
+MAIN_QUEUE = "document.classified.report"   # this worker's own queue on the fanout
+DLQ_QUEUE = "document.classified.report.dlq"
 MAX_RETRIES = 3
 
 
@@ -257,10 +258,10 @@ def run_worker():
             connection = pika.BlockingConnection(parameters)
             channel = connection.channel()
 
-            # Declare DLQ queue first
+            # Fanout exchange: this worker binds its OWN queue so it receives
+            # every classified event (no competing with triage/topic workers).
+            channel.exchange_declare(exchange=CLASSIFIED_EXCHANGE, exchange_type="fanout", durable=True)
             channel.queue_declare(queue=DLQ_QUEUE, durable=True)
-
-            # Declare main queue with Dead Letter Exchange binding to DLQ
             channel.queue_declare(
                 queue=MAIN_QUEUE,
                 durable=True,
@@ -269,6 +270,7 @@ def run_worker():
                     'x-dead-letter-routing-key': DLQ_QUEUE
                 }
             )
+            channel.queue_bind(exchange=CLASSIFIED_EXCHANGE, queue=MAIN_QUEUE)
 
             channel.basic_qos(prefetch_count=1)
             channel.basic_consume(queue=MAIN_QUEUE, on_message_callback=process_message)
