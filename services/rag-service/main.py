@@ -63,6 +63,96 @@ def get_db_connection():
     )
 
 
+# ---------------------------------------------------------------------------
+# Qdrant: the persistent vector store (primary). Postgres vector_chunks is kept
+# as a dual-write fallback so retrieval still works if Qdrant is unavailable.
+# ---------------------------------------------------------------------------
+QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
+QDRANT_COLLECTION = "mineiq_documents"
+EMBED_DIM = 384
+
+_qclient = None
+_qdrant_ready = False
+
+
+def get_qdrant():
+    global _qclient, _qdrant_ready
+    if _qclient is not None:
+        return _qclient
+    try:
+        from qdrant_client import QdrantClient
+        from qdrant_client.http import models as qm
+        client = QdrantClient(url=QDRANT_URL, timeout=10.0)
+        existing = [c.name for c in client.get_collections().collections]
+        if QDRANT_COLLECTION not in existing:
+            client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config=qm.VectorParams(size=EMBED_DIM, distance=qm.Distance.COSINE),
+            )
+            logger.info(f"Created Qdrant collection '{QDRANT_COLLECTION}'.")
+        _qclient = client
+        _qdrant_ready = True
+        logger.info("Qdrant vector store connected.")
+    except Exception as e:
+        _qdrant_ready = False
+        logger.warning(f"Qdrant unavailable, falling back to Postgres vectors: {e}")
+    return _qclient
+
+
+def qdrant_index(document_id, doc_type, chunks_with_vecs, subsidiary, topic):
+    """Replace this document's points (for the given doc_type) then upsert fresh ones."""
+    import uuid as _uuid
+    client = get_qdrant()
+    if not client:
+        return 0
+    from qdrant_client.http import models as qm
+    flt = qm.Filter(must=[
+        qm.FieldCondition(key="document_id", match=qm.MatchValue(value=str(document_id))),
+        qm.FieldCondition(key="doc_type", match=qm.MatchValue(value=doc_type)),
+    ])
+    try:
+        client.delete(collection_name=QDRANT_COLLECTION, points_selector=qm.FilterSelector(filter=flt))
+        points = []
+        for idx, chunk, vec in chunks_with_vecs:
+            if not vec:
+                continue
+            points.append(qm.PointStruct(
+                id=str(_uuid.uuid4()), vector=vec,
+                payload={"document_id": str(document_id), "chunk_index": idx, "chunk_text": chunk,
+                         "subsidiary": subsidiary, "doc_type": doc_type, "topic": topic},
+            ))
+        if points:
+            client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+        return len(points)
+    except Exception as e:
+        logger.warning(f"Qdrant index failed: {e}")
+        return 0
+
+
+def qdrant_search(query_vec, document_id, limit):
+    """Return candidate chunks from Qdrant (payload + score); [] if unavailable."""
+    client = get_qdrant()
+    if not client or not query_vec:
+        return None
+    from qdrant_client.http import models as qm
+    qfilter = None
+    if document_id:
+        qfilter = qm.Filter(must=[qm.FieldCondition(key="document_id", match=qm.MatchValue(value=str(document_id)))])
+    try:
+        hits = client.search(collection_name=QDRANT_COLLECTION, query_vector=query_vec,
+                             limit=limit, query_filter=qfilter, with_payload=True)
+        out = []
+        for h in hits:
+            p = h.payload or {}
+            out.append({"document_id": p.get("document_id"), "chunk_index": p.get("chunk_index", 0),
+                        "chunk_text": p.get("chunk_text", ""), "subsidiary": p.get("subsidiary"),
+                        "doc_type": p.get("doc_type"), "score": float(h.score)})
+        return out
+    except Exception as e:
+        logger.warning(f"Qdrant search failed: {e}")
+        return None
+
+
 class IndexRequest(BaseModel):
     document_id: str
     extracted_text: str
@@ -81,7 +171,9 @@ class QueryRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "embedder_active": embedder is not None}
+    get_qdrant()
+    return {"status": "ok", "embedder_active": embedder is not None,
+            "vector_store": "qdrant" if _qdrant_ready else "postgres"}
 
 
 def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50) -> List[str]:
@@ -312,12 +404,14 @@ def index_document(payload: IndexRequest):
 
     conn = get_db_connection()
     try:
+        chunks_with_vecs = []
         with conn.cursor() as cur:
             # Clear previous chunks for this document/report kind
             cur.execute("DELETE FROM vector_chunks WHERE document_id = %s AND doc_type = %s;", (payload.document_id, payload.doc_type))
-            
+
             for idx, chunk in enumerate(chunks):
                 vec = compute_dense_embedding(chunk)
+                chunks_with_vecs.append((idx, chunk, vec))
                 cur.execute(
                     """
                     INSERT INTO vector_chunks (document_id, chunk_index, chunk_text, embedding, subsidiary, doc_type, topic)
@@ -326,7 +420,13 @@ def index_document(payload: IndexRequest):
                     (payload.document_id, idx, chunk, vec, payload.subsidiary, payload.doc_type, payload.topic)
                 )
             conn.commit()
-            return {"status": "indexed", "chunks_indexed": len(chunks), "embeddings_generated": embedder is not None}
+
+        # Primary vector store: Qdrant (Postgres above is the fallback copy).
+        q_indexed = qdrant_index(payload.document_id, payload.doc_type, chunks_with_vecs,
+                                 payload.subsidiary, payload.topic)
+        return {"status": "indexed", "chunks_indexed": len(chunks),
+                "embeddings_generated": embedder is not None,
+                "qdrant_points": q_indexed, "vector_store": "qdrant" if _qdrant_ready else "postgres"}
     finally:
         conn.close()
 
@@ -356,52 +456,62 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
 
         query_vec = compute_dense_embedding(payload.query)
 
-        # Retrieve candidate chunks from PostgreSQL with HARD document_id metadata filter when specified
-        with conn.cursor() as cur:
-            query_sql = """
-                SELECT v.id, v.document_id, v.chunk_index, v.chunk_text, v.embedding, v.subsidiary, v.doc_type, v.topic,
-                       d.original_filename
-                FROM vector_chunks v
-                JOIN documents d ON v.document_id = d.id
-            """
-            params = []
-            if payload.document_id:
-                query_sql += " WHERE v.document_id = %s"
-                params.append(payload.document_id)
-
-            cur.execute(query_sql, tuple(params))
-            all_chunks = cur.fetchall()
-
-        # Enforce RBAC & strict document isolation filtering on retrieved chunks
-        authorized_chunks = []
-        for chunk in all_chunks:
-            chunk_sub = chunk.get("subsidiary")
-            if verify_document_access(user, chunk_sub):
-                # Hard Isolation Validation Check
-                if payload.document_id and str(chunk["document_id"]) != str(payload.document_id):
-                    logger.error(f"SECURITY ISOLATION VIOLATION: Chunk doc_id '{chunk['document_id']}' leaked for requested doc_id '{payload.document_id}'. Purging.")
-                    log_audit_event(conn, user["username"], user["role"], "ISOLATION_VIOLATION_BLOCKED", "rag-service", "PURGED", document_id=payload.document_id)
-                    continue
-
-                if query_vec and chunk.get("embedding"):
-                    score = compute_cosine_similarity(query_vec, chunk["embedding"])
+        # --- Candidate retrieval: Qdrant (primary), Postgres (fallback) ---
+        limit = max(payload.top_k * 5, 25)
+        candidates = qdrant_search(query_vec, payload.document_id, limit)
+        vector_backend = "qdrant"
+        if candidates is None:
+            vector_backend = "postgres"
+            with conn.cursor() as cur:
+                sql = "SELECT document_id, chunk_index, chunk_text, embedding, subsidiary, doc_type FROM vector_chunks"
+                params = []
+                if payload.document_id:
+                    sql += " WHERE document_id = %s"
+                    params.append(payload.document_id)
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+            candidates = []
+            for r in rows:
+                if query_vec and r.get("embedding"):
+                    sc = compute_cosine_similarity(query_vec, r["embedding"])
                 else:
-                    score = compute_tf_similarity(payload.query, chunk["chunk_text"])
+                    sc = compute_tf_similarity(payload.query, r["chunk_text"])
+                candidates.append({"document_id": str(r["document_id"]), "chunk_index": r.get("chunk_index", 0),
+                                   "chunk_text": r["chunk_text"], "subsidiary": r.get("subsidiary"),
+                                   "doc_type": r.get("doc_type"), "score": sc})
 
-                if score > 0.001:
-                    authorized_chunks.append({
-                        "doc_id": str(chunk["document_id"]),
-                        "filename": chunk["original_filename"],
-                        "chunk_index": chunk.get("chunk_index", 0),
-                        "subsidiary": chunk["subsidiary"],
-                        "doc_type": chunk["doc_type"],
-                        "text": chunk["chunk_text"],
-                        "score": score
-                    })
+        # Resolve filenames for candidate documents in one query.
+        fnmap = {}
+        docids = list({c["document_id"] for c in candidates if c.get("document_id")})
+        if docids:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, original_filename FROM documents WHERE id = ANY(%s::uuid[]);", (docids,))
+                fnmap = {str(r["id"]): r["original_filename"] for r in cur.fetchall()}
 
-        # Sort by relevance score
+        # Enforce RBAC & strict document isolation on retrieved candidates
+        # (defense in depth — applied in Python regardless of vector backend).
+        authorized_chunks = []
+        for c in candidates:
+            if not verify_document_access(user, c.get("subsidiary")):
+                continue
+            if payload.document_id and str(c["document_id"]) != str(payload.document_id):
+                logger.error(f"SECURITY ISOLATION VIOLATION: chunk doc '{c['document_id']}' leaked for requested doc '{payload.document_id}'. Purging.")
+                log_audit_event(conn, user["username"], user["role"], "ISOLATION_VIOLATION_BLOCKED", "rag-service", "PURGED", document_id=payload.document_id)
+                continue
+            if c["score"] > 0.001:
+                authorized_chunks.append({
+                    "doc_id": str(c["document_id"]),
+                    "filename": fnmap.get(str(c["document_id"]), "document"),
+                    "chunk_index": c.get("chunk_index", 0),
+                    "subsidiary": c.get("subsidiary"),
+                    "doc_type": c.get("doc_type"),
+                    "text": c["chunk_text"],
+                    "score": c["score"],
+                })
+
         authorized_chunks.sort(key=lambda x: x["score"], reverse=True)
         top_chunks = authorized_chunks[:payload.top_k]
+        logger.info(f"Vector retrieval via {vector_backend}: {len(candidates)} candidates -> {len(top_chunks)} authorized")
 
         if not top_chunks:
             log_audit_event(

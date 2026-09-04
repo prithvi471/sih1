@@ -67,6 +67,19 @@ services:
       timeout: 5s
       retries: 5
 
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: mineiq-qdrant
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: [ "CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   redis:
     image: redis
     container_name: mineiq-redis
@@ -310,10 +323,13 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
       OLLAMA_ENDPOINT: http://ollama:11434
       OLLAMA_MODEL: llama3.1
+      QDRANT_URL: http://qdrant:6333
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
+        condition: service_healthy
+      qdrant:
         condition: service_healthy
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
@@ -404,5 +420,6 @@ volumes:
   redis_data:
   ollama_data:
   keycloak_data:
+  qdrant_data:
 
 
