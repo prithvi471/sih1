@@ -1,0 +1,360 @@
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: mineiq-minio
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mc-init:
+    image: minio/mc:latest
+    container_name: mineiq-mc-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    entrypoint: >
+      /bin/sh -c " until /usr/bin/mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
+        echo 'Waiting for MinIO...';
+        sleep 1;
+      done; /usr/bin/mc mb --ignore-existing myminio/raw-files; echo 'Bucket raw-files ready.'; exit 0; "
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: mineiq-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mineiq_docs}
+      POSTGRES_USER: ${POSTGRES_USER:-mineiq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mineiq} -d ${POSTGRES_DB:-mineiq_docs}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: mineiq-rabbitmq
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-mineiq}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-mineiq_pass}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis
+    container_name: mineiq-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ingestion-service:
+    build:
+      context: ./services/ingestion-service
+      dockerfile: Dockerfile
+    container_name: mineiq-ingestion-service
+    ports:
+      - "${INGESTION_SERVICE_PORT:-8000}:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: raw-files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mc-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ocr-service:
+    build:
+      context: ./services/ocr-service
+      dockerfile: Dockerfile
+    container_name: mineiq-ocr-service
+    ports:
+      - "${OCR_SERVICE_PORT:-8002}:8000"
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: raw-files
+      OCR_TIMEOUT_SECONDS: 60.0
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mineiq-ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+
+    healthcheck:
+      test: [ "CMD", "ollama", "list" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  validation-service:
+    build:
+      context: ./services/validation-service
+      dockerfile: Dockerfile
+    container_name: mineiq-validation-service
+    ports:
+      - "${VALIDATION_SERVICE_PORT:-8003}:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+      SIMILARITY_THRESHOLD: 85.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  classification-service:
+    build:
+      context: ./services/classification-service
+      dockerfile: Dockerfile
+    container_name: mineiq-classification-service
+    ports:
+      - "${CLASSIFICATION_SERVICE_PORT:-8004}:8000"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_AMQP_PORT: 5672
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-mineiq}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-mineiq_pass}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      OLLAMA_ENDPOINT: http://ollama:11434
+      OLLAMA_MODEL: llama3.1
+      CACHE_TTL: 3600
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  report-generation-worker:
+    build:
+      context: ./services/report-generation-worker
+      dockerfile: Dockerfile
+    container_name: mineiq-report-generation-worker
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_AMQP_PORT: 5672
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-mineiq}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-mineiq_pass}
+      OLLAMA_ENDPOINT: http://ollama:11434
+      OLLAMA_MODEL: llama3.1
+      RAG_SERVICE_URL: http://rag-service:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  topic-modeling-worker:
+    build:
+      context: ./services/topic-modeling-worker
+      dockerfile: Dockerfile
+    container_name: mineiq-topic-modeling-worker
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_AMQP_PORT: 5672
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-mineiq}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-mineiq_pass}
+      RAG_SERVICE_URL: http://rag-service:8000
+      OLLAMA_ENDPOINT: http://ollama:11434
+      OLLAMA_MODEL: llama3.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  triage-worker:
+    build:
+      context: ./services/triage-worker
+      dockerfile: Dockerfile
+    container_name: mineiq-triage-worker
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_AMQP_PORT: 5672
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-mineiq}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-mineiq_pass}
+      RAG_SERVICE_URL: http://rag-service:8000
+      OLLAMA_ENDPOINT: http://ollama:11434
+      OLLAMA_MODEL: llama3.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+
+  rag-service:
+    build:
+      context: ./services/rag-service
+      dockerfile: Dockerfile
+    container_name: mineiq-rag-service
+    ports:
+      - "${RAG_SERVICE_PORT:-8005}:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+      OLLAMA_ENDPOINT: http://ollama:11434
+      OLLAMA_MODEL: llama3.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  analytics-service:
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    container_name: mineiq-analytics-service
+    ports:
+      - "${ANALYTICS_SERVICE_PORT:-8006}:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-mineiq_docs}
+      DB_USER: ${POSTGRES_USER:-mineiq}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mineiq-frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      ingestion-service:
+        condition: service_healthy
+
+volumes:
+  minio_data:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:
+  ollama_data:
+
+

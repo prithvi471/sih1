@@ -1,0 +1,64 @@
+{
+  "dataset": "MineIQ structured-extraction benchmark",
+  "note": "SYNTHETIC DEMONSTRATION DATA - expected values are ground truth for these fixtures ONLY, not official CIL data. Fixture text is in the post-OCR format the extractor receives in production (spreadsheet cells joined by ' | ').",
+  "tolerance": 0.01,
+  "cases": [
+    {
+      "id": "mcl_production_table_2025",
+      "description": "Clean 3-mine MCL production table (spreadsheet path)",
+      "text": "Mine | Subsidiary | Report Year | Production Target MT | Actual Production MT | Dispatch MT | Overburden MCuM\nLakhanpur Open Cast Mine | MCL | 2025 | 56.0 | 54.1 | 51.2 | 12.4\nAnanta Colliery | MCL | 2025 | 30.0 | 28.5 | 27.0 | 8.1\nKulda Mine | MCL | 2025 | 20.0 | 19.2 | 18.5 | 5.2",
+      "expected": [
+        {"mine_name": "Lakhanpur Open Cast Mine", "subsidiary": "MCL", "report_year": 2025, "production_target_mt": 56.0, "actual_production_mt": 54.1, "dispatch_mt": 51.2, "overburden_mcum": 12.4},
+        {"mine_name": "Ananta Colliery", "subsidiary": "MCL", "report_year": 2025, "production_target_mt": 30.0, "actual_production_mt": 28.5, "dispatch_mt": 27.0, "overburden_mcum": 8.1},
+        {"mine_name": "Kulda Mine", "subsidiary": "MCL", "report_year": 2025, "production_target_mt": 20.0, "actual_production_mt": 19.2, "dispatch_mt": 18.5, "overburden_mcum": 5.2}
+      ]
+    },
+    {
+      "id": "ncl_table_alt_headers_2024",
+      "description": "NCL table using alternate header words (Achieved / Offtake / OB)",
+      "text": "Colliery | Company | Year | Target | Achieved | Offtake | OB\nJhingurda | NCL | 2024 | 15.0 | 14.2 | 13.9 | 3.4\nNigahi | NCL | 2024 | 18.5 | 19.0 | 18.1 | 4.7",
+      "expected": [
+        {"mine_name": "Jhingurda", "subsidiary": "NCL", "report_year": 2024, "production_target_mt": 15.0, "actual_production_mt": 14.2, "dispatch_mt": 13.9, "overburden_mcum": 3.4},
+        {"mine_name": "Nigahi", "subsidiary": "NCL", "report_year": 2024, "production_target_mt": 18.5, "actual_production_mt": 19.0, "dispatch_mt": 18.1, "overburden_mcum": 4.7}
+      ]
+    },
+    {
+      "id": "prose_report_single",
+      "description": "Narrative report sentence (prose fallback path)",
+      "text": "Annual review: Kulda Mine of MCL recorded actual production 19.2 MT against a target 20.0 MT during 2024, with dispatch 18.5 MT.",
+      "expected": [
+        {"mine_name": "Kulda", "subsidiary": "MCL", "report_year": 2024, "production_target_mt": 20.0, "actual_production_mt": 19.2, "dispatch_mt": 18.5}
+      ]
+    },
+    {
+      "id": "prose_full_subsidiary_name",
+      "description": "Hard case: subsidiary spelled out + 'produced' phrasing (measures real limitations, not tuned to pass)",
+      "text": "Mahanadi Coalfields Limited - Bhubaneswari OCP produced 45.6 MT against a target of 47.0 MT in 2023.",
+      "expected": [
+        {"mine_name": "Bhubaneswari", "subsidiary": "MCL", "report_year": 2023, "production_target_mt": 47.0, "actual_production_mt": 45.6}
+      ]
+    },
+    {
+      "id": "negative_no_metrics",
+      "description": "Precision test: narrative with no production figures should yield NO records",
+      "text": "The quarterly safety inspection at the colliery found all equipment compliant and no lost-time incidents were reported this period.",
+      "expected": []
+    },
+    {
+      "id": "hard_respectively_construction",
+      "description": "Known-hard (not tuned): split 'target and actual ... were X and Y respectively'",
+      "text": "At Talcher Coalfield, target and actual production stood at 56.0 and 54.1 MT respectively during 2022.",
+      "expected": [
+        {"mine_name": "Talcher", "report_year": 2022, "production_target_mt": 56.0, "actual_production_mt": 54.1}
+      ]
+    },
+    {
+      "id": "hard_numbers_as_words",
+      "description": "Known-hard (not tuned): figures written as words (common in scanned OCR)",
+      "text": "Kaniha OCP of NCL produced fifty-four MT in 2021 against a target of sixty MT.",
+      "expected": [
+        {"mine_name": "Kaniha", "subsidiary": "NCL", "report_year": 2021, "production_target_mt": 60.0, "actual_production_mt": 54.0}
+      ]
+    }
+  ]
+}
