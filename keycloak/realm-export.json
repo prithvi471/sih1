@@ -1,0 +1,65 @@
+{
+  "realm": "mineiq",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "roles": {
+    "realm": [
+      { "name": "ADMIN" },
+      { "name": "MINISTRY_OFFICER" },
+      { "name": "CMPDI_OFFICER" },
+      { "name": "SUBSIDIARY_OFFICER" },
+      { "name": "ANALYST" },
+      { "name": "AUDITOR" },
+      { "name": "VIEWER" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "mineiq-frontend",
+      "name": "MineIQ Web App",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "assigned_subsidiary",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "assigned_subsidiary",
+            "claim.name": "assigned_subsidiary",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "kc_admin",
+      "enabled": true,
+      "email": "kc_admin@cil.example",
+      "firstName": "Keycloak",
+      "lastName": "Admin",
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["ADMIN"]
+    },
+    {
+      "username": "kc_mcl_officer",
+      "enabled": true,
+      "firstName": "MCL",
+      "lastName": "Officer",
+      "attributes": { "assigned_subsidiary": ["MCL"] },
+      "credentials": [{ "type": "password", "value": "mcl123", "temporary": false }],
+      "realmRoles": ["SUBSIDIARY_OFFICER"]
+    }
+  ]
+}

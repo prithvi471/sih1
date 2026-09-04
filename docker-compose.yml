@@ -350,11 +350,31 @@ services:
       ingestion-service:
         condition: service_healthy
 
+  # Optional enterprise identity provider (OIDC). Off by default — start with:
+  #   docker compose --profile keycloak up -d keycloak
+  # Then set KEYCLOAK_ENABLED=true and KEYCLOAK_JWKS_URL on the services that
+  # should validate Keycloak tokens. The demo HS256 auth keeps working as-is.
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: mineiq-keycloak
+    profiles: ["keycloak"]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "${KEYCLOAK_PORT:-8080}:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - keycloak_data:/opt/keycloak/data
+
 volumes:
   minio_data:
   postgres_data:
   rabbitmq_data:
   redis_data:
   ollama_data:
+  keycloak_data:
 
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   FileText, Upload, Database, Shield, Search, Sparkles, BarChart3,
   RefreshCw, AlertTriangle, CheckCircle2, Download, ArrowLeft, Layers,
-  MessageSquare, Activity, ChevronRight
+  MessageSquare, Activity, ChevronRight, Users, Trash2, Plus
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -10,13 +10,16 @@ const RAG_API = 'http://localhost:8005';
 const ANALYTICS_API = 'http://localhost:8006';
 
 const DEMO_USERS = [
-  { username: 'admin', role: 'ADMIN', name: 'System Admin', sub: null },
-  { username: 'ministry_officer', role: 'MINISTRY_OFFICER', name: 'Ministry of Coal Officer', sub: null },
-  { username: 'cmpdi_officer', role: 'CMPDI_OFFICER', name: 'CMPDI Nodal Officer', sub: 'CMPDI' },
-  { username: 'mcl_officer', role: 'SUBSIDIARY_OFFICER', name: 'MCL Officer (MCL only)', sub: 'MCL' },
-  { username: 'ecl_officer', role: 'SUBSIDIARY_OFFICER', name: 'ECL Officer (ECL only)', sub: 'ECL' },
-  { username: 'auditor_user', role: 'AUDITOR', name: 'Compliance Auditor', sub: null },
+  { username: 'admin', role: 'ADMIN', name: 'System Admin', sub: null, pw: 'admin123' },
+  { username: 'ministry_officer', role: 'MINISTRY_OFFICER', name: 'Ministry of Coal Officer', sub: null, pw: 'ministry123' },
+  { username: 'cmpdi_officer', role: 'CMPDI_OFFICER', name: 'CMPDI Nodal Officer', sub: 'CMPDI', pw: 'cmpdi123' },
+  { username: 'mcl_officer', role: 'SUBSIDIARY_OFFICER', name: 'MCL Officer (MCL only)', sub: 'MCL', pw: 'mcl123' },
+  { username: 'ecl_officer', role: 'SUBSIDIARY_OFFICER', name: 'ECL Officer (ECL only)', sub: 'ECL', pw: 'ecl123' },
+  { username: 'auditor_user', role: 'AUDITOR', name: 'Compliance Auditor', sub: null, pw: 'audit123' },
 ];
+
+const CAN_READ_USERS = ['ADMIN', 'AUDITOR', 'MINISTRY_OFFICER'];
+const CAN_WRITE_USERS = ['ADMIN'];
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: Activity },
@@ -24,8 +27,11 @@ const NAV = [
   { id: 'ask', label: 'Ask AI', icon: Sparkles },
   { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   { id: 'discrepancies', label: 'Discrepancies', icon: AlertTriangle },
+  { id: 'users', label: 'Users', icon: Users, needsRole: CAN_READ_USERS },
   { id: 'audit', label: 'Audit', icon: Shield },
 ];
+
+const ALL_ROLES = ['ADMIN', 'MINISTRY_OFFICER', 'CMPDI_OFFICER', 'SUBSIDIARY_OFFICER', 'ANALYST', 'AUDITOR', 'VIEWER'];
 
 const pct = (v) => (v === null || v === undefined ? null : `${v}%`);
 
@@ -90,6 +96,9 @@ export default function App() {
   const [topics, setTopics] = useState([]);
   const [trends, setTrends] = useState([]);
   const [discrepancies, setDiscrepancies] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [newUser, setNewUser] = useState({ username: '', password: '', full_name: '', role: 'VIEWER', assigned_subsidiary: '' });
+  const [userMsg, setUserMsg] = useState(null);
 
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [selectedReport, setSelectedReport] = useState(null);
@@ -116,7 +125,7 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: u.username, password: `${username.split('_')[0]}123` }),
+        body: JSON.stringify({ username: u.username, password: u.pw }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -135,6 +144,38 @@ export default function App() {
     fetch(`${ANALYTICS_API}/analytics/topics`, h).then(r => r.json()).then(t2 => t2.topics && setTopics(t2.topics)).catch(() => {});
     fetch(`${ANALYTICS_API}/analytics/trends`, h).then(r => r.json()).then(tr => tr.trends && setTrends(tr.trends)).catch(() => {});
     fetch(`${ANALYTICS_API}/analytics/discrepancies`, h).then(r => r.json()).then(setDiscrepancies).catch(() => {});
+    fetch(`${API_BASE}/auth/users`, h).then(r => r.ok ? r.json() : []).then(u => Array.isArray(u) && setUsers(u)).catch(() => setUsers([]));
+  }
+
+  async function createUser() {
+    setUserMsg(null);
+    const body = { ...newUser };
+    if (!body.assigned_subsidiary) delete body.assigned_subsidiary;
+    try {
+      const res = await fetch(`${API_BASE}/auth/users`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) { setUserMsg(data.detail || 'Failed to create user'); return; }
+      setNewUser({ username: '', password: '', full_name: '', role: 'VIEWER', assigned_subsidiary: '' });
+      setUserMsg(`Created ${data.username}`);
+      loadAll();
+    } catch (e) { setUserMsg(e.message); }
+  }
+
+  async function toggleUser(u) {
+    await fetch(`${API_BASE}/auth/users/${u.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ is_active: !u.is_active }),
+    }).then(r => { if (!r.ok) r.json().then(d => alert(d.detail)); });
+    loadAll();
+  }
+
+  async function removeUser(u) {
+    if (!confirm(`Delete user ${u.username}?`)) return;
+    const res = await fetch(`${API_BASE}/auth/users/${u.id}`, { method: 'DELETE', headers: authHeaders() });
+    if (!res.ok) { const d = await res.json(); alert(d.detail); }
+    loadAll();
   }
 
   async function handleUpload() {
@@ -226,7 +267,7 @@ export default function App() {
             </div>
           </div>
           <nav className="nav">
-            {NAV.map(n => {
+            {NAV.filter(n => !n.needsRole || n.needsRole.includes(user.role)).map(n => {
               const Icon = n.icon;
               return (
                 <button key={n.id} className={`tab ${tab === n.id || (n.id === 'documents' && tab === 'document') ? 'active' : ''}`} onClick={() => setTab(n.id)}>
@@ -543,6 +584,58 @@ export default function App() {
                     ))}
                   </div>
                 ) : <div className="empty">No discrepancies detected in your authorized scope.</div>}
+              </div>
+            </div>
+          )}
+
+          {/* USERS */}
+          {tab === 'users' && (
+            <div className="stack">
+              {CAN_WRITE_USERS.includes(user.role) && (
+                <div className="card">
+                  <div className="section-title" style={{ marginBottom: 12 }}>Add user</div>
+                  <div className="grid-3" style={{ gap: 10 }}>
+                    <input className="input" placeholder="Username" value={newUser.username} onChange={e => setNewUser({ ...newUser, username: e.target.value })} />
+                    <input className="input" placeholder="Full name" value={newUser.full_name} onChange={e => setNewUser({ ...newUser, full_name: e.target.value })} />
+                    <input className="input" type="password" placeholder="Password (min 6)" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} />
+                    <select className="select" value={newUser.role} onChange={e => setNewUser({ ...newUser, role: e.target.value })}>
+                      {ALL_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                    <select className="select" value={newUser.assigned_subsidiary} onChange={e => setNewUser({ ...newUser, assigned_subsidiary: e.target.value })}>
+                      <option value="">No subsidiary scope</option>
+                      {['MCL', 'ECL', 'BCCL', 'CCL', 'WCL', 'SECL', 'NCL', 'CMPDI'].map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <button className="btn btn-primary" onClick={createUser} disabled={!newUser.username || !newUser.password || !newUser.full_name}><Plus size={15} /> Create</button>
+                  </div>
+                  {userMsg && <div className="small" style={{ marginTop: 10, color: userMsg.startsWith('Created') ? 'var(--green)' : 'var(--red)' }}>{userMsg}</div>}
+                </div>
+              )}
+              <div className="card">
+                <div className="section-title" style={{ marginBottom: 12 }}>Users &amp; roles ({users.length})</div>
+                <div className="table-wrap">
+                  <table className="table">
+                    <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Scope</th><th>Status</th><th>Last login</th>{CAN_WRITE_USERS.includes(user.role) && <th></th>}</tr></thead>
+                    <tbody>
+                      {users.map(u => (
+                        <tr key={u.id}>
+                          <td style={{ fontWeight: 560 }}>{u.username}</td>
+                          <td className="muted">{u.full_name}</td>
+                          <td><span className="badge badge-accent">{u.role}</span></td>
+                          <td>{u.assigned_subsidiary || '—'}</td>
+                          <td><span className={`badge ${u.is_active ? 'badge-green' : 'badge-red'}`}>{u.is_active ? 'active' : 'disabled'}</span></td>
+                          <td className="muted small">{u.last_login ? new Date(u.last_login).toLocaleString() : 'never'}</td>
+                          {CAN_WRITE_USERS.includes(user.role) && (
+                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                              <button className="btn btn-ghost btn-sm" onClick={() => toggleUser(u)}>{u.is_active ? 'Disable' : 'Enable'}</button>
+                              {u.username !== user.username && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6, color: 'var(--red)' }} onClick={() => removeUser(u)}><Trash2 size={13} /></button>}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                      {users.length === 0 && <tr><td colSpan={7} className="empty">No users visible.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}

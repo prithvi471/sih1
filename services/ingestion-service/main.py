@@ -20,7 +20,11 @@ import sys
 
 # Add parent directory for shared auth module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from auth import create_jwt_token, decode_jwt_token, get_current_user, verify_document_access, log_audit_event
+from auth import (
+    create_jwt_token, decode_jwt_token, get_current_user, verify_document_access,
+    log_audit_event, hash_password, verify_password, is_hashed, require_permission,
+    has_permission, ROLES, ROLE_PERMISSIONS, ALL_PERMISSIONS,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ingestion-service")
@@ -162,6 +166,9 @@ def ensure_schema(conn):
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 """,
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ;",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(150);",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'flagged';",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'failed';",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'awaiting_signoff';",
@@ -208,6 +215,34 @@ def ensure_schema(conn):
         conn.autocommit = old_autocommit
 
 
+_passwords_bootstrapped = False
+
+
+def bootstrap_passwords(conn):
+    """Hash any legacy plaintext passwords once per process (idempotent)."""
+    global _passwords_bootstrapped
+    if _passwords_bootstrapped:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, password_hash FROM users;")
+            rows = cur.fetchall()
+            upgraded = 0
+            for row in rows:
+                if not is_hashed(row["password_hash"]):
+                    cur.execute(
+                        "UPDATE users SET password_hash = %s WHERE id = %s;",
+                        (hash_password(row["password_hash"]), row["id"]),
+                    )
+                    upgraded += 1
+            conn.commit()
+            if upgraded:
+                logger.info(f"Hashed {upgraded} legacy plaintext password(s) with bcrypt.")
+        _passwords_bootstrapped = True
+    except Exception as e:
+        logger.warning(f"Password bootstrap notice: {str(e)}")
+
+
 def get_db_connection():
     try:
         conn = psycopg2.connect(
@@ -219,6 +254,7 @@ def get_db_connection():
             cursor_factory=RealDictCursor
         )
         ensure_schema(conn)
+        bootstrap_passwords(conn)
         return conn
     except Exception as e:
         raise HTTPException(
@@ -303,13 +339,28 @@ def login(payload: LoginRequest):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, username, password_hash, full_name, role, assigned_subsidiary FROM users WHERE username = %s;",
+                "SELECT id, username, password_hash, full_name, role, assigned_subsidiary, COALESCE(is_active, true) AS is_active FROM users WHERE username = %s;",
                 (payload.username,)
             )
             user = cur.fetchone()
-            if not user or user["password_hash"] != payload.password:
+            if not user or not verify_password(payload.password, user["password_hash"]):
                 log_audit_event(conn, payload.username, "UNKNOWN", "LOGIN", "ingestion-service", "FAILED_CREDENTIALS")
                 raise HTTPException(status_code=401, detail="Invalid username or password")
+
+            if not user["is_active"]:
+                log_audit_event(conn, user["username"], user["role"], "LOGIN", "ingestion-service", "ACCOUNT_DISABLED")
+                raise HTTPException(status_code=403, detail="Account is disabled")
+
+            # Transparent upgrade: if the stored password was still plaintext,
+            # replace it with a bcrypt hash now that we have the cleartext.
+            if not is_hashed(user["password_hash"]):
+                try:
+                    cur.execute("UPDATE users SET password_hash = %s WHERE id = %s;",
+                                (hash_password(payload.password), user["id"]))
+                except Exception:
+                    pass
+            cur.execute("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s;", (user["id"],))
+            conn.commit()
 
             token = create_jwt_token(
                 username=user["username"],
@@ -336,7 +387,189 @@ def login(payload: LoginRequest):
 @app.get("/auth/me")
 def get_me(authorization: Optional[str] = Header(None)):
     user = get_current_user(authorization)
+    perms = ROLE_PERMISSIONS.get(user.get("role"), set())
+    user["permissions"] = ["*"] if "*" in perms else sorted(perms)
     return user
+
+
+# ---------------------------------------------------------------------------
+# RBAC: roles / permissions catalogue and user administration API.
+# ---------------------------------------------------------------------------
+@app.get("/auth/roles")
+def list_roles(user: dict = Depends(require_permission("users.read"))):
+    return {
+        "roles": [
+            {"role": r, "permissions": ["*"] if "*" in ROLE_PERMISSIONS.get(r, set()) else sorted(ROLE_PERMISSIONS.get(r, set()))}
+            for r in ROLES
+        ],
+        "all_permissions": ALL_PERMISSIONS,
+    }
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    full_name: str
+    role: str
+    assigned_subsidiary: Optional[str] = None
+    email: Optional[str] = None
+
+
+class UpdateUserRequest(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    assigned_subsidiary: Optional[str] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
+    email: Optional[str] = None
+
+
+def _serialize_user(u: dict) -> dict:
+    return {
+        "id": str(u["id"]),
+        "username": u["username"],
+        "full_name": u["full_name"],
+        "role": u["role"],
+        "assigned_subsidiary": u.get("assigned_subsidiary"),
+        "email": u.get("email"),
+        "is_active": u.get("is_active", True),
+        "last_login": u["last_login"].isoformat() if u.get("last_login") else None,
+        "created_at": u["created_at"].isoformat() if u.get("created_at") else None,
+    }
+
+
+@app.get("/auth/users")
+def list_users(user: dict = Depends(require_permission("users.read"))):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, username, full_name, role, assigned_subsidiary, email, "
+                "COALESCE(is_active, true) AS is_active, last_login, created_at "
+                "FROM users ORDER BY created_at ASC;"
+            )
+            return [_serialize_user(u) for u in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+@app.post("/auth/users", status_code=201)
+def create_user(payload: CreateUserRequest, admin: dict = Depends(require_permission("users.write"))):
+    if payload.role not in ROLES:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of {ROLES}")
+    if payload.role == "SUBSIDIARY_OFFICER" and not payload.assigned_subsidiary:
+        raise HTTPException(status_code=400, detail="SUBSIDIARY_OFFICER requires assigned_subsidiary")
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE username = %s;", (payload.username,))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="Username already exists")
+            cur.execute(
+                """
+                INSERT INTO users (username, password_hash, full_name, role, assigned_subsidiary, email, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, true)
+                RETURNING id, username, full_name, role, assigned_subsidiary, email, is_active, last_login, created_at;
+                """,
+                (payload.username, hash_password(payload.password), payload.full_name,
+                 payload.role, payload.assigned_subsidiary, payload.email),
+            )
+            new_user = cur.fetchone()
+            conn.commit()
+            log_audit_event(conn, admin["username"], admin["role"], "USER_CREATED", "ingestion-service", "SUCCESS",
+                            metadata={"new_user": payload.username, "role": payload.role})
+            return _serialize_user(new_user)
+    except HTTPException:
+        conn.rollback(); raise
+    finally:
+        conn.close()
+
+
+@app.patch("/auth/users/{user_id}")
+def update_user(user_id: str, payload: UpdateUserRequest, admin: dict = Depends(require_permission("users.write"))):
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user id")
+    if payload.role is not None and payload.role not in ROLES:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of {ROLES}")
+
+    fields, values = [], []
+    if payload.full_name is not None: fields.append("full_name = %s"); values.append(payload.full_name)
+    if payload.role is not None: fields.append("role = %s"); values.append(payload.role)
+    if payload.assigned_subsidiary is not None: fields.append("assigned_subsidiary = %s"); values.append(payload.assigned_subsidiary)
+    if payload.is_active is not None: fields.append("is_active = %s"); values.append(payload.is_active)
+    if payload.email is not None: fields.append("email = %s"); values.append(payload.email)
+    if payload.password is not None:
+        if len(payload.password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        fields.append("password_hash = %s"); values.append(hash_password(payload.password))
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Guard: don't let an admin disable/demote the last active admin.
+            if payload.is_active is False or (payload.role and payload.role != "ADMIN"):
+                cur.execute("SELECT role, COALESCE(is_active,true) AS is_active FROM users WHERE id = %s;", (str(uid),))
+                target = cur.fetchone()
+                if target and target["role"] == "ADMIN":
+                    cur.execute("SELECT COUNT(*)::int AS n FROM users WHERE role='ADMIN' AND COALESCE(is_active,true)=true;")
+                    if cur.fetchone()["n"] <= 1:
+                        raise HTTPException(status_code=400, detail="Cannot disable or demote the last active admin")
+
+            values.append(str(uid))
+            cur.execute(
+                f"UPDATE users SET {', '.join(fields)} WHERE id = %s "
+                "RETURNING id, username, full_name, role, assigned_subsidiary, email, "
+                "COALESCE(is_active, true) AS is_active, last_login, created_at;",
+                tuple(values),
+            )
+            updated = cur.fetchone()
+            if not updated:
+                raise HTTPException(status_code=404, detail="User not found")
+            conn.commit()
+            log_audit_event(conn, admin["username"], admin["role"], "USER_UPDATED", "ingestion-service", "SUCCESS",
+                            metadata={"user_id": str(uid), "fields": [f.split(" =")[0] for f in fields]})
+            return _serialize_user(updated)
+    except HTTPException:
+        conn.rollback(); raise
+    finally:
+        conn.close()
+
+
+@app.delete("/auth/users/{user_id}")
+def delete_user(user_id: str, admin: dict = Depends(require_permission("users.write"))):
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user id")
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, role FROM users WHERE id = %s;", (str(uid),))
+            target = cur.fetchone()
+            if not target:
+                raise HTTPException(status_code=404, detail="User not found")
+            if target["username"] == admin["username"]:
+                raise HTTPException(status_code=400, detail="You cannot delete your own account")
+            if target["role"] == "ADMIN":
+                cur.execute("SELECT COUNT(*)::int AS n FROM users WHERE role='ADMIN';")
+                if cur.fetchone()["n"] <= 1:
+                    raise HTTPException(status_code=400, detail="Cannot delete the last admin")
+            cur.execute("DELETE FROM users WHERE id = %s;", (str(uid),))
+            conn.commit()
+            log_audit_event(conn, admin["username"], admin["role"], "USER_DELETED", "ingestion-service", "SUCCESS",
+                            metadata={"deleted_user": target["username"]})
+            return {"status": "deleted", "username": target["username"]}
+    except HTTPException:
+        conn.rollback(); raise
+    finally:
+        conn.close()
 
 
 # Document Upload Endpoint
