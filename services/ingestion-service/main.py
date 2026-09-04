@@ -1195,6 +1195,41 @@ def get_audit_logs(
         conn.close()
 
 
+@app.get("/prometheus")
+def prometheus_metrics():
+    """Prometheus exposition of current platform gauges (scraped by Prometheus)."""
+    from fastapi.responses import Response
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            def one(sql, params=()):
+                cur.execute(sql, params)
+                return cur.fetchone()["v"]
+            g = {
+                "mineiq_documents_total": one("SELECT COUNT(*)::int v FROM documents;"),
+                "mineiq_documents_processed_total": one("SELECT COUNT(*)::int v FROM documents WHERE status='classified';"),
+                "mineiq_documents_failed_total": one("SELECT COUNT(*)::int v FROM documents WHERE status='failed';"),
+                "mineiq_documents_flagged_total": one("SELECT COUNT(*)::int v FROM documents WHERE status='flagged';"),
+                "mineiq_reports_total": one("SELECT COUNT(*)::int v FROM reports;"),
+                "mineiq_structured_records_total": one("SELECT COUNT(*)::int v FROM structured_data;"),
+                "mineiq_discrepancies_total": one("SELECT COUNT(*)::int v FROM domain_validations WHERE check_type='inconsistency';"),
+                "mineiq_audit_events_total": one("SELECT COUNT(*)::int v FROM audit_logs;"),
+                "mineiq_users_total": one("SELECT COUNT(*)::int v FROM users;"),
+            }
+            try:
+                g["mineiq_parliamentary_questions_total"] = one("SELECT COUNT(*)::int v FROM parliamentary_questions;")
+            except Exception:
+                conn.rollback()
+        lines = []
+        for name, val in g.items():
+            lines.append(f"# HELP {name} MineIQ gauge")
+            lines.append(f"# TYPE {name} gauge")
+            lines.append(f"{name} {val}")
+        return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+    finally:
+        conn.close()
+
+
 @app.get("/metrics")
 def get_metrics():
     conn = get_db_connection()

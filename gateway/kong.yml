@@ -1,0 +1,35 @@
+_format_version: "3.0"
+
+# Declarative (db-less) routing so Kong is a single entry point in front of the
+# MineIQ services. Each service is reachable under a path prefix.
+services:
+  - name: ingestion
+    url: http://ingestion-service:8000
+    routes:
+      - name: ingestion-route
+        paths: ["/ingestion"]
+        strip_path: true
+  - name: ocr
+    url: http://ocr-service:8000
+    routes:
+      - name: ocr-route
+        paths: ["/ocr"]
+        strip_path: true
+  - name: rag
+    url: http://rag-service:8000
+    routes:
+      - name: rag-route
+        paths: ["/rag"]
+        strip_path: true
+  - name: analytics
+    url: http://analytics-service:8000
+    routes:
+      - name: analytics-route
+        paths: ["/analytics-api"]
+        strip_path: true
+  - name: pq
+    url: http://pq-service:8000
+    routes:
+      - name: pq-route
+        paths: ["/pq"]
+        strip_path: true

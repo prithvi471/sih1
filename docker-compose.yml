@@ -406,6 +406,49 @@ services:
       timeout: 5s
       retries: 5
 
+  # Observability (start with: docker compose --profile observability up -d)
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: mineiq-prometheus
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: mineiq-grafana
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    volumes:
+      - ./observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/ds.yml:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+
+  # API gateway / single entry point (start with: docker compose --profile gateway up -d)
+  kong:
+    image: kong:3.7
+    container_name: mineiq-kong
+    profiles: ["gateway"]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+    volumes:
+      - ./gateway/kong.yml:/kong/kong.yml:ro
+    ports:
+      - "${KONG_PROXY_PORT:-8010}:8000"
+      - "${KONG_ADMIN_PORT:-8011}:8001"
+
   frontend:
     build:
       context: ./frontend
@@ -445,5 +488,7 @@ volumes:
   keycloak_data:
   qdrant_data:
   neo4j_data:
+  prometheus_data:
+  grafana_data:
 
 
