@@ -2,12 +2,14 @@ import React, { useState, useEffect } from 'react';
 import {
   FileText, Upload, Database, Shield, Search, Sparkles, BarChart3,
   RefreshCw, AlertTriangle, CheckCircle2, Download, ArrowLeft, Layers,
-  MessageSquare, Activity, ChevronRight, Users, Trash2, Plus, LogOut, Lock
+  MessageSquare, Activity, ChevronRight, Users, Trash2, Plus, LogOut, Lock,
+  Landmark, Gavel, CheckCircle
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
 const RAG_API = 'http://localhost:8005';
 const ANALYTICS_API = 'http://localhost:8006';
+const PQ_API = 'http://localhost:8007';
 
 const DEMO_USERS = [
   { username: 'admin', role: 'ADMIN', name: 'System Admin', sub: null, pw: 'admin123' },
@@ -20,10 +22,13 @@ const DEMO_USERS = [
 
 const CAN_READ_USERS = ['ADMIN', 'AUDITOR', 'MINISTRY_OFFICER'];
 const CAN_WRITE_USERS = ['ADMIN'];
+const CAN_WRITE_PQ = ['ADMIN', 'MINISTRY_OFFICER', 'CMPDI_OFFICER'];
+const CAN_APPROVE_PQ = ['ADMIN', 'MINISTRY_OFFICER'];
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: Activity },
   { id: 'documents', label: 'Documents', icon: Database },
+  { id: 'parliament', label: 'Parliament', icon: Landmark },
   { id: 'ask', label: 'Ask AI', icon: Sparkles },
   { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   { id: 'discrepancies', label: 'Discrepancies', icon: AlertTriangle },
@@ -129,6 +134,10 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [newUser, setNewUser] = useState({ username: '', password: '', full_name: '', role: 'VIEWER', assigned_subsidiary: '' });
   const [userMsg, setUserMsg] = useState(null);
+  const [pqs, setPqs] = useState([]);
+  const [selectedPQ, setSelectedPQ] = useState(null);
+  const [newPQ, setNewPQ] = useState({ question_text: '', pq_number: '', due_date: '' });
+  const [pqBusy, setPqBusy] = useState(false);
 
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [selectedReport, setSelectedReport] = useState(null);
@@ -184,6 +193,51 @@ export default function App() {
     fetch(`${ANALYTICS_API}/analytics/trends`, h).then(r => r.json()).then(tr => tr.trends && setTrends(tr.trends)).catch(() => {});
     fetch(`${ANALYTICS_API}/analytics/discrepancies`, h).then(r => r.json()).then(setDiscrepancies).catch(() => {});
     fetch(`${API_BASE}/auth/users`, h).then(r => r.ok ? r.json() : []).then(u => Array.isArray(u) && setUsers(u)).catch(() => setUsers([]));
+    fetch(`${PQ_API}/api/parliament/questions`, h).then(r => r.ok ? r.json() : []).then(p => Array.isArray(p) && setPqs(p)).catch(() => setPqs([]));
+  }
+
+  async function createPQ() {
+    setPqBusy(true);
+    try {
+      const body = { question_text: newPQ.question_text };
+      if (newPQ.pq_number) body.pq_number = newPQ.pq_number;
+      if (newPQ.due_date) body.due_date = newPQ.due_date;
+      const res = await fetch(`${PQ_API}/api/parliament/questions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(data.detail || 'Failed to register PQ'); return; }
+      setNewPQ({ question_text: '', pq_number: '', due_date: '' });
+      loadAll();
+      openPQ(data.id);
+    } catch (e) { alert(e.message); } finally { setPqBusy(false); }
+  }
+
+  async function openPQ(id) {
+    try {
+      const r = await fetch(`${PQ_API}/api/parliament/questions/${id}`, { headers: authHeaders() });
+      if (r.ok) setSelectedPQ(await r.json());
+    } catch (e) { /* ignore */ }
+  }
+
+  async function generatePQDraft(id) {
+    setPqBusy(true);
+    try {
+      const r = await fetch(`${PQ_API}/api/parliament/questions/${id}/generate-draft`, { method: 'POST', headers: authHeaders() });
+      if (!r.ok) { const d = await r.json(); alert(d.detail || 'Draft failed'); return; }
+      await openPQ(id); loadAll();
+    } catch (e) { alert(e.message); } finally { setPqBusy(false); }
+  }
+
+  async function reviewPQ(id, decision) {
+    try {
+      const r = await fetch(`${PQ_API}/api/parliament/questions/${id}/review`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ decision }),
+      });
+      if (!r.ok) { const d = await r.json(); alert(d.detail || 'Review failed'); return; }
+      await openPQ(id); loadAll();
+    } catch (e) { alert(e.message); }
   }
 
   async function createUser() {
@@ -673,6 +727,96 @@ export default function App() {
                   </div>
                 ) : <div className="empty">No discrepancies detected in your authorized scope.</div>}
               </div>
+            </div>
+          )}
+
+          {/* PARLIAMENT */}
+          {tab === 'parliament' && (
+            <div className="stack">
+              {CAN_WRITE_PQ.includes(user.role) && (
+                <div className="card">
+                  <div className="section-title" style={{ marginBottom: 4 }}>Parliamentary Question Copilot</div>
+                  <div className="small muted" style={{ marginBottom: 12 }}>Register a question — MineIQ extracts the subsidiaries, metrics and period, then drafts a cited response from authorized records.</div>
+                  <div className="stack" style={{ gap: 10 }}>
+                    <textarea className="input" rows={3} placeholder="e.g. Provide production and dispatch figures for MCL, NCL and SECL for the last five years and explain major variations."
+                      value={newPQ.question_text} onChange={e => setNewPQ({ ...newPQ, question_text: e.target.value })} style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+                    <div className="grid-3" style={{ gap: 10 }}>
+                      <input className="input" placeholder="PQ number (optional)" value={newPQ.pq_number} onChange={e => setNewPQ({ ...newPQ, pq_number: e.target.value })} />
+                      <input className="input" type="date" value={newPQ.due_date} onChange={e => setNewPQ({ ...newPQ, due_date: e.target.value })} />
+                      <button className="btn btn-primary" onClick={createPQ} disabled={pqBusy || !newPQ.question_text.trim()}>
+                        {pqBusy ? <RefreshCw size={15} className="spin" /> : <Landmark size={15} />} Register &amp; analyze
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="card">
+                <div className="section-title" style={{ marginBottom: 12 }}>Questions ({pqs.length})</div>
+                <div className="table-wrap">
+                  <table className="table">
+                    <thead><tr><th>PQ</th><th>Question</th><th>Subsidiaries</th><th>Due</th><th>Status</th><th></th></tr></thead>
+                    <tbody>
+                      {pqs.map(p => (
+                        <tr key={p.id}>
+                          <td className="mono small">{p.pq_number || '—'}</td>
+                          <td style={{ maxWidth: 320 }}>{(p.question_text || '').slice(0, 90)}{p.question_text?.length > 90 ? '…' : ''}</td>
+                          <td>{(p.subsidiaries || []).map(s => <span key={s} className="badge badge-accent" style={{ marginRight: 4 }}>{s}</span>)}</td>
+                          <td className="muted small">{p.due_date || '—'}</td>
+                          <td><span className={`badge ${p.status === 'APPROVED' ? 'badge-green' : p.status === 'REJECTED' ? 'badge-red' : p.status === 'PENDING_APPROVAL' ? 'badge-amber' : 'badge-accent'}`}>{p.status}</span></td>
+                          <td style={{ textAlign: 'right' }}><button className="btn btn-ghost btn-sm" onClick={() => openPQ(p.id)}>View <ChevronRight size={13} /></button></td>
+                        </tr>
+                      ))}
+                      {pqs.length === 0 && <tr><td colSpan={6} className="empty">No parliamentary questions yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {selectedPQ && (
+                <div className="card">
+                  <div className="row between" style={{ alignItems: 'flex-start', marginBottom: 10 }}>
+                    <div>
+                      <div className="mono small muted">{selectedPQ.pq_number || 'PQ'} · {selectedPQ.house || ''}</div>
+                      <div style={{ fontWeight: 600, fontSize: '1rem', maxWidth: '62ch', marginTop: 2 }}>{selectedPQ.question_text}</div>
+                    </div>
+                    <span className={`badge ${selectedPQ.status === 'APPROVED' ? 'badge-green' : selectedPQ.status === 'PENDING_APPROVAL' ? 'badge-amber' : 'badge-accent'}`}>{selectedPQ.status}</span>
+                  </div>
+                  <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+                    {(selectedPQ.subsidiaries || []).map(s => <span key={s} className="badge badge-accent">{s}</span>)}
+                    {selectedPQ.period_from && <span className="badge">{selectedPQ.period_from}–{selectedPQ.period_to}</span>}
+                    {(selectedPQ.metrics || []).map(m => <span key={m} className="badge">{m}</span>)}
+                    {(selectedPQ.tasks || []).length > 0 && <span className="small muted">· {selectedPQ.tasks.length} subsidiary task(s)</span>}
+                  </div>
+
+                  {CAN_WRITE_PQ.includes(user.role) && (
+                    <button className="btn btn-primary" onClick={() => generatePQDraft(selectedPQ.id)} disabled={pqBusy} style={{ marginBottom: 14 }}>
+                      {pqBusy ? <RefreshCw size={15} className="spin" /> : <Gavel size={15} />} {selectedPQ.response ? 'Regenerate draft' : 'Generate cited draft'}
+                    </button>
+                  )}
+
+                  {selectedPQ.response ? (
+                    <div>
+                      <div className="row between" style={{ marginBottom: 8 }}>
+                        <span className="section-title">Draft response</span>
+                        <span className="badge badge-amber">{selectedPQ.response.status}</span>
+                      </div>
+                      <div style={{ border: '1px solid var(--border)', borderRadius: 12, padding: '16px 18px', background: 'var(--surface-2, var(--bg))' }}>
+                        <Markdown text={selectedPQ.response.draft_text} />
+                      </div>
+                      {selectedPQ.status === 'PENDING_APPROVAL' && CAN_APPROVE_PQ.includes(user.role) && (
+                        <div className="row" style={{ gap: 8, marginTop: 12 }}>
+                          <button className="btn btn-primary" onClick={() => reviewPQ(selectedPQ.id, 'APPROVED')}><CheckCircle size={15} /> Approve</button>
+                          <button className="btn btn-ghost btn-sm" style={{ color: 'var(--red)' }} onClick={() => reviewPQ(selectedPQ.id, 'REJECTED')}>Reject</button>
+                        </div>
+                      )}
+                      {selectedPQ.status === 'APPROVED' && <div className="small" style={{ color: 'var(--green)', marginTop: 10 }}>✓ Approved{selectedPQ.response.approved_by ? ` by ${selectedPQ.response.approved_by}` : ''}</div>}
+                    </div>
+                  ) : (
+                    <div className="empty">No draft generated yet.</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
