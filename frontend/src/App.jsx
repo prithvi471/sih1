@@ -55,9 +55,34 @@ function Markdown({ text }) {
         : <span key={i}>{p}</span>
     );
   };
-  lines.forEach((raw, i) => {
+  const isTableRow = (s) => /^\s*\|.*\|\s*$/.test(s);
+  const isSep = (s) => /^\s*\|[\s:|-]+\|\s*$/.test(s);
+  const cells = (s) => s.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
     const line = raw.trimEnd();
-    if (!line.trim()) { flush(i); return; }
+    if (!line.trim()) { flush(i); i++; continue; }
+
+    // Markdown table block
+    if (isTableRow(line) && i + 1 < lines.length && isSep(lines[i + 1])) {
+      flush(i);
+      const header = cells(line);
+      const rows = [];
+      i += 2;
+      while (i < lines.length && isTableRow(lines[i]) && !isSep(lines[i])) { rows.push(cells(lines[i])); i++; }
+      out.push(
+        <div key={`t${i}`} className="table-wrap" style={{ margin: '8px 0 14px' }}>
+          <table className="table">
+            <thead><tr>{header.map((c, k) => <th key={k}>{inline(c)}</th>)}</tr></thead>
+            <tbody>{rows.map((r, ri) => <tr key={ri}>{r.map((c, ci) => <td key={ci}>{inline(c)}</td>)}</tr>)}</tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
     const h = line.match(/^(#{1,4})\s+(.*)$/);
     const b = line.match(/^\s*[-*]\s+(.*)$/);
     if (h) {
@@ -71,7 +96,8 @@ function Markdown({ text }) {
       flush(i);
       out.push(<p key={i} style={{ margin: '0 0 8px' }}>{inline(line)}</p>);
     }
-  });
+    i++;
+  }
   flush('end');
   return <div className="prose" style={{ whiteSpace: 'normal' }}>{out}</div>;
 }

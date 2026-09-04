@@ -20,22 +20,50 @@ def _clean_inline(text: str) -> str:
     return text.strip()
 
 
+def _is_table_row(s: str) -> bool:
+    return bool(re.match(r'^\s*\|.*\|\s*$', s))
+
+
+def _is_sep_row(s: str) -> bool:
+    return bool(re.match(r'^\s*\|[\s:|-]+\|\s*$', s))
+
+
+def _cells(s: str) -> List[str]:
+    return [_clean_inline(c) for c in s.strip().strip('|').split('|')]
+
+
 def _parse_blocks(md: str) -> List[Dict[str, Any]]:
-    """Turn Markdown text into a flat list of typed blocks."""
+    """Turn Markdown text into a flat list of typed blocks (incl. tables)."""
     blocks: List[Dict[str, Any]] = []
-    for raw in (md or "").splitlines():
-        line = raw.rstrip()
+    lines = (md or "").splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
         if not line.strip():
+            i += 1
+            continue
+        # Markdown table
+        if _is_table_row(line) and i + 1 < len(lines) and _is_sep_row(lines[i + 1]):
+            header = _cells(line)
+            rows = []
+            i += 2
+            while i < len(lines) and _is_table_row(lines[i]) and not _is_sep_row(lines[i]):
+                rows.append(_cells(lines[i]))
+                i += 1
+            blocks.append({"type": "table", "header": header, "rows": rows})
             continue
         h = re.match(r'^(#{1,6})\s+(.*)$', line)
         if h:
             blocks.append({"type": "heading", "level": len(h.group(1)), "text": _clean_inline(h.group(2))})
+            i += 1
             continue
         b = re.match(r'^\s*[-*]\s+(.*)$', line)
         if b:
             blocks.append({"type": "bullet", "text": _clean_inline(b.group(1))})
+            i += 1
             continue
         blocks.append({"type": "para", "text": _clean_inline(line)})
+        i += 1
     return blocks
 
 
@@ -90,6 +118,20 @@ def render_docx(report: Dict[str, Any], document: Dict[str, Any]) -> bytes:
             doc.add_heading(blk["text"], level=min(blk["level"], 4))
         elif blk["type"] == "bullet":
             doc.add_paragraph(blk["text"], style="List Bullet")
+        elif blk["type"] == "table":
+            ncols = max([len(blk["header"])] + [len(r) for r in blk["rows"]] or [1])
+            table = doc.add_table(rows=1, cols=ncols)
+            table.style = "Light Grid Accent 1"
+            for j, cell in enumerate(blk["header"]):
+                if j < ncols:
+                    run = table.rows[0].cells[j].paragraphs[0].add_run(cell.replace("**", ""))
+                    run.bold = True
+            for r in blk["rows"]:
+                cells = table.add_row().cells
+                for j, val in enumerate(r):
+                    if j < ncols:
+                        cells[j].text = val.replace("**", "")
+            doc.add_paragraph()
         else:
             doc.add_paragraph(blk["text"])
 
@@ -147,6 +189,30 @@ def render_pdf(report: Dict[str, Any], document: Dict[str, Any]) -> bytes:
             pdf.set_text_color(30, 30, 30)
             pdf.set_font("Helvetica", "", 11)
             cell(6, f"  -  {blk['text']}")
+        elif blk["type"] == "table":
+            ncols = max([len(blk["header"])] + [len(r) for r in blk["rows"]] or [1])
+            cw = width / ncols
+            pdf.ln(1)
+            # header
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_fill_color(31, 42, 68)
+            pdf.set_text_color(255, 255, 255)
+            for j in range(ncols):
+                txt = _txt(blk["header"][j].replace("**", "")) if j < len(blk["header"]) else ""
+                pdf.cell(cw, 7, txt, border=1, align="C", fill=True)
+            pdf.ln(7)
+            # rows
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(30, 30, 30)
+            fill = False
+            for r in blk["rows"]:
+                pdf.set_fill_color(244, 246, 249)
+                for j in range(ncols):
+                    txt = _txt(r[j].replace("**", "")) if j < len(r) else ""
+                    pdf.cell(cw, 6.5, txt, border=1, align="C", fill=fill)
+                pdf.ln(6.5)
+                fill = not fill
+            pdf.ln(2)
         else:
             pdf.set_text_color(30, 30, 30)
             pdf.set_font("Helvetica", "", 11)
