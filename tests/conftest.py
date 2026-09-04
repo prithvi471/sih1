@@ -54,6 +54,22 @@ def post(url, token=None, body=None, **kw):
     return _req("POST", url, token, body, **kw)
 
 
+def upload_csv(token, filename, content):
+    import uuid as _uuid
+    boundary = "----mineiqtest" + _uuid.uuid4().hex
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: text/csv\r\n\r\n{content}\r\n--{boundary}--\r\n"
+    ).encode()
+    req = urllib.request.Request(f"{ING}/upload", data=body, method="POST", headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    })
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read().decode())
+
+
 def login(username):
     st, d = post(f"{ING}/auth/login", body={"username": username, "password": CREDS[username]})
     assert st == 200, f"login {username} failed: {st} {d}"

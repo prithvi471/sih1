@@ -169,6 +169,9 @@ def ensure_schema(conn):
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ;",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(150);",
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS version INT DEFAULT 1;",
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS supersedes_document_id UUID;",
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(100);",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'flagged';",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'failed';",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'awaiting_signoff';",
@@ -612,23 +615,45 @@ async def upload_document(
                 object_name
             )
 
+            # Versioning: a new upload with the SAME filename but DIFFERENT
+            # content (not a SHA duplicate) is treated as the next version and
+            # links back to the most recent prior version. Original files stay
+            # immutable — each version is its own object in MinIO.
             cur.execute(
                 """
-                INSERT INTO documents (id, original_filename, s3_key, source_type, idempotency_key, status)
-                VALUES (%s, %s, %s, %s, %s, 'uploaded')
-                RETURNING id, s3_key, status;
+                SELECT id, version FROM documents
+                WHERE original_filename = %s
+                ORDER BY version DESC, uploaded_at DESC LIMIT 1;
                 """,
-                (doc_id, file.filename, s3_key, source_type, idempotency_key)
+                (file.filename,)
+            )
+            prior = cur.fetchone()
+            version = (prior["version"] + 1) if prior and prior.get("version") else (2 if prior else 1)
+            supersedes = str(prior["id"]) if prior else None
+
+            cur.execute(
+                """
+                INSERT INTO documents (id, original_filename, s3_key, source_type, idempotency_key, status,
+                                       version, supersedes_document_id, uploaded_by)
+                VALUES (%s, %s, %s, %s, %s, 'uploaded', %s, %s, %s)
+                RETURNING id, s3_key, status, version;
+                """,
+                (doc_id, file.filename, s3_key, source_type, idempotency_key,
+                 version, supersedes, user["username"])
             )
             new_doc = cur.fetchone()
             conn.commit()
 
-            log_audit_event(conn, user["username"], user["role"], "DOCUMENT_UPLOADED", "ingestion-service", "SUCCESS", document_id=doc_id, metadata={"filename": file.filename, "size": len(contents)})
+            log_audit_event(conn, user["username"], user["role"], "DOCUMENT_UPLOADED", "ingestion-service", "SUCCESS",
+                            document_id=doc_id, metadata={"filename": file.filename, "size": len(contents),
+                                                          "version": version, "supersedes": supersedes})
 
             return {
                 "id": str(new_doc["id"]),
                 "s3_key": new_doc["s3_key"],
-                "status": new_doc["status"]
+                "status": new_doc["status"],
+                "version": new_doc["version"],
+                "supersedes_document_id": supersedes,
             }
     except HTTPException:
         conn.rollback()
@@ -706,6 +731,7 @@ def get_document(
                 SELECT d.id, d.original_filename, d.s3_key, d.source_type, d.idempotency_key, 
                        d.status, d.doc_type, d.subsidiary, d.urgency, d.topic_area, d.extracted_text,
                        d.flag_reason, d.failure_reason, d.is_duplicate, d.uploaded_at, d.updated_at,
+                       d.version, d.supersedes_document_id, d.uploaded_by,
                        s.mine_name, s.report_year, s.production_target_mt, s.actual_production_mt,
                        s.dispatch_mt, s.overburden_mcum
                 FROM documents d
@@ -726,6 +752,8 @@ def get_document(
                 raise HTTPException(status_code=403, detail=f"Forbidden: Your role '{user['role']}' is not authorized to view documents for subsidiary '{doc.get('subsidiary')}'")
 
             doc["id"] = str(doc["id"])
+            if doc.get("supersedes_document_id"):
+                doc["supersedes_document_id"] = str(doc["supersedes_document_id"])
             if doc.get("uploaded_at"):
                 doc["uploaded_at"] = doc["uploaded_at"].isoformat()
             if doc.get("updated_at"):
@@ -750,6 +778,52 @@ def get_document(
 
             log_audit_event(conn, user["username"], user["role"], "DOCUMENT_VIEWED", "ingestion-service", "SUCCESS", document_id=document_id)
             return doc
+    finally:
+        conn.close()
+
+
+@app.get("/documents/{document_id}/lineage")
+def get_document_lineage(document_id: str, authorization: Optional[str] = Header(None)):
+    """Return the full version chain (oldest -> newest) for a document."""
+    user = get_current_user(authorization)
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document UUID format")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT original_filename, subsidiary FROM documents WHERE id = %s;", (str(doc_uuid),))
+            base = cur.fetchone()
+            if not base:
+                raise HTTPException(status_code=404, detail="Document not found")
+            if not verify_document_access(user, base.get("subsidiary")):
+                raise HTTPException(status_code=403, detail="Forbidden document scope")
+
+            # All versions share the same filename; order by version.
+            cur.execute(
+                """
+                SELECT id, version, status, uploaded_by, uploaded_at, supersedes_document_id,
+                       left(idempotency_key, 12) AS sha_prefix
+                FROM documents WHERE original_filename = %s
+                ORDER BY version ASC, uploaded_at ASC;
+                """,
+                (base["original_filename"],)
+            )
+            chain = []
+            for r in cur.fetchall():
+                chain.append({
+                    "id": str(r["id"]),
+                    "version": r["version"],
+                    "status": r["status"],
+                    "uploaded_by": r.get("uploaded_by"),
+                    "uploaded_at": r["uploaded_at"].isoformat() if r.get("uploaded_at") else None,
+                    "supersedes_document_id": str(r["supersedes_document_id"]) if r.get("supersedes_document_id") else None,
+                    "sha256_prefix": r.get("sha_prefix"),
+                    "is_current": str(r["id"]) == document_id,
+                })
+            return {"filename": base["original_filename"], "versions": len(chain), "lineage": chain}
     finally:
         conn.close()
 
