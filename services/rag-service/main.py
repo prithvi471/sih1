@@ -1,5 +1,6 @@
 import os
 import json
+import re as _re
 import logging
 import math
 import httpx
@@ -127,6 +128,32 @@ def qdrant_index(document_id, doc_type, chunks_with_vecs, subsidiary, topic):
     except Exception as e:
         logger.warning(f"Qdrant index failed: {e}")
         return 0
+
+
+ANALYTICS_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://analytics-service:8000")
+_SUBSIDIARY_RE_Q = _re.compile(r'\b(ECL|BCCL|CCL|WCL|SECL|MCL|NCL|CMPDI)\b', _re.IGNORECASE)
+
+
+def graph_context(query: str):
+    """
+    Graph retrieval: ask the analytics/graph service which documents the Neo4j
+    knowledge graph connects to the subsidiaries in the question. Returns
+    (related_document_ids, relationships[], entities[]) so the graph both
+    re-ranks retrieval and is shown as evidence. Done over HTTP so rag-service
+    needs no Neo4j driver of its own.
+    """
+    subs = sorted({m.group(1).upper() for m in _SUBSIDIARY_RE_Q.finditer(query or "")})
+    if not subs:
+        return set(), [], []
+    try:
+        with httpx.Client(timeout=8.0) as c:
+            r = c.get(f"{ANALYTICS_URL}/graph/related", params={"subs": ",".join(subs)})
+            if r.status_code == 200:
+                d = r.json()
+                return set(d.get("document_ids", [])), d.get("relationships", []), subs
+    except Exception as e:
+        logger.warning(f"graph_context lookup failed: {e}")
+    return set(), [], subs
 
 
 def qdrant_search(query_vec, document_id, limit):
@@ -509,6 +536,10 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
 
         query_vec = compute_dense_embedding(payload.query)
 
+        # --- Graph retrieval (Neo4j): documents the graph connects to the
+        # entities in the question. Used to both re-rank and to return as evidence. ---
+        graph_doc_ids, graph_rels, graph_entities = graph_context(payload.query)
+
         # --- Candidate retrieval: Qdrant (primary), Postgres (fallback) ---
         limit = max(payload.top_k * 5, 25)
         candidates = qdrant_search(query_vec, payload.document_id, limit)
@@ -563,9 +594,18 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
                     "score": c["score"],
                 })
 
+        # --- Evidence fusion: boost chunks from graph-connected documents. ---
+        for c in authorized_chunks:
+            if c["doc_id"] in graph_doc_ids:
+                c["score"] = c["score"] * 1.25 + 0.05
+                c["graph_linked"] = True
         authorized_chunks.sort(key=lambda x: x["score"], reverse=True)
         top_chunks = authorized_chunks[:payload.top_k]
-        logger.info(f"Vector retrieval via {vector_backend}: {len(candidates)} candidates -> {len(top_chunks)} authorized")
+        logger.info(
+            f"RETRIEVAL TRACE | q='{payload.query[:60]}' | entities={graph_entities} | "
+            f"graph_docs={len(graph_doc_ids)} | vector({vector_backend})={len(candidates)} candidates "
+            f"-> {len(top_chunks)} fused"
+        )
 
         if not top_chunks:
             log_audit_event(
@@ -655,18 +695,26 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
                     "page_number": page,
                     "page_citation": f"Page {page}" if page else "Page-level citation unavailable for this source",
                     "subsidiary": c["subsidiary"],
+                    "graph_linked": bool(c.get("graph_linked")),
                     "relevance_snippet": snippet
                 })
 
         log_audit_event(
             conn, user["username"], user["role"], "RAG_QUERY", "rag-service", "SUCCESS",
-            metadata={"query": payload.query, "document_id": payload.document_id, "sources_count": len(sources)}
+            metadata={"query": payload.query, "document_id": payload.document_id, "sources_count": len(sources),
+                      "retrieval": "sql+vector+graph" if graph_doc_ids else "vector"}
         )
 
         return {
             "answer": answer,
             "sources": sources,
             "grounded": True,
+            "retrieval_methods": (["vector"] + (["graph"] if graph_doc_ids else [])),
+            "graph_context": {
+                "entities": graph_entities,
+                "linked_documents": len(graph_doc_ids),
+                "relationships": graph_rels[:12],
+            },
             "user_role": user["role"],
             "authorized_scope": user.get("assigned_subsidiary") or "ALL"
         }

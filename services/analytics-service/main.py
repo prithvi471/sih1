@@ -543,6 +543,30 @@ def graph_overview(authorization: Optional[str] = Header(None)):
             "authorized_scope": user.get("assigned_subsidiary") or "ALL"}
 
 
+@app.get("/graph/related")
+def graph_related(subs: str = "", authorization: Optional[str] = Header(None)):
+    """Documents/mines/entities the graph connects to the given subsidiaries.
+    Used by rag-service to fuse graph evidence into RAG (comma-separated codes)."""
+    get_current_user(authorization)
+    codes = [c.strip().upper() for c in subs.split(",") if c.strip()]
+    drv = get_graph()
+    if not drv or not codes:
+        return {"document_ids": [], "relationships": [], "entities": codes}
+    doc_ids, rels = [], []
+    try:
+        with drv.session() as s:
+            for sub in codes:
+                for r in s.run("MATCH (d:Document)-[:BELONGS_TO]->(x:Subsidiary {name:$s}) RETURN d.id AS id, d.filename AS fn LIMIT 30", s=sub):
+                    if r["id"]:
+                        doc_ids.append(str(r["id"]))
+                        rels.append({"from": sub, "rel": "BELONGS_TO", "to": r["fn"]})
+                for r in s.run("MATCH (x:Subsidiary {name:$s})-[:OPERATES]->(m:Mine) RETURN m.name AS name LIMIT 30", s=sub):
+                    rels.append({"from": sub, "rel": "OPERATES", "to": r["name"]})
+    except Exception as e:
+        logger.warning(f"graph_related failed: {e}")
+    return {"document_ids": list(dict.fromkeys(doc_ids)), "relationships": rels[:20], "entities": codes}
+
+
 @app.get("/graph/entities")
 def graph_entities(authorization: Optional[str] = Header(None)):
     """Entities extracted from the corpus (canonical name, type, aliases, mention count)."""
