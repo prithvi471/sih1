@@ -592,6 +592,10 @@ def extract_text(payload: ExtractRequest):
                 method = "raw_text_decode"
                 pages = 1
 
+        # Strip lone UTF-16 surrogates that OCR/PDF text extraction can emit;
+        # they are invalid UTF-8 and break downstream DB/JSON encoding.
+        text = "".join(ch for ch in (text or "") if not 0xD800 <= ord(ch) <= 0xDFFF)
+
         struct_records = extract_structured_records(text)
         struct_data = struct_records[0] if struct_records else extract_structured_mining_data(text)
         logger.info(f"Structured extraction for {payload.document_id}: {len(struct_records)} record(s)")

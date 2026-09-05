@@ -172,6 +172,7 @@ def ensure_schema(conn):
                 "ALTER TABLE documents ADD COLUMN IF NOT EXISTS version INT DEFAULT 1;",
                 "ALTER TABLE documents ADD COLUMN IF NOT EXISTS supersedes_document_id UUID;",
                 "ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(100);",
+                "ALTER TABLE vector_chunks ADD COLUMN IF NOT EXISTS page_number INT;",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'flagged';",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'failed';",
                 "ALTER TYPE document_status_enum ADD VALUE IF NOT EXISTS 'awaiting_signoff';",

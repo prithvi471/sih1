@@ -113,13 +113,13 @@ def qdrant_index(document_id, doc_type, chunks_with_vecs, subsidiary, topic):
     try:
         client.delete(collection_name=QDRANT_COLLECTION, points_selector=qm.FilterSelector(filter=flt))
         points = []
-        for idx, chunk, vec in chunks_with_vecs:
+        for idx, page, chunk, vec in chunks_with_vecs:
             if not vec:
                 continue
             points.append(qm.PointStruct(
                 id=str(_uuid.uuid4()), vector=vec,
                 payload={"document_id": str(document_id), "chunk_index": idx, "chunk_text": chunk,
-                         "subsidiary": subsidiary, "doc_type": doc_type, "topic": topic},
+                         "page_number": page, "subsidiary": subsidiary, "doc_type": doc_type, "topic": topic},
             ))
         if points:
             client.upsert(collection_name=QDRANT_COLLECTION, points=points)
@@ -146,7 +146,8 @@ def qdrant_search(query_vec, document_id, limit):
             p = h.payload or {}
             out.append({"document_id": p.get("document_id"), "chunk_index": p.get("chunk_index", 0),
                         "chunk_text": p.get("chunk_text", ""), "subsidiary": p.get("subsidiary"),
-                        "doc_type": p.get("doc_type"), "score": float(h.score)})
+                        "doc_type": p.get("doc_type"), "page_number": p.get("page_number"),
+                        "score": float(h.score)})
         return out
     except Exception as e:
         logger.warning(f"Qdrant search failed: {e}")
@@ -176,18 +177,44 @@ def health():
             "vector_store": "qdrant" if _qdrant_ready else "postgres"}
 
 
+import re as _re
+
+_PAGE_MARKER = _re.compile(r'---\s*Page\s+(\d+)\s*---', _re.IGNORECASE)
+
+
 def chunk_text(text: str, chunk_size: int = 400, overlap: int = 50) -> List[str]:
-    """Splits text into overlapping paragraph chunks."""
+    """Splits text into overlapping word chunks (page-agnostic)."""
     words = text.split()
     if not words:
         return []
     chunks = []
     i = 0
     while i < len(words):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
+        chunks.append(" ".join(words[i:i + chunk_size]))
         i += (chunk_size - overlap)
     return chunks
+
+
+def page_aware_chunks(text: str, chunk_size: int = 400, overlap: int = 50):
+    """
+    Return [(page_number, chunk_text), ...]. When the OCR text carries
+    '--- Page N ---' markers (digital/scanned PDFs), chunks are tagged with the
+    real source page so retrieval can cite it. Otherwise page_number is None.
+    """
+    if not text:
+        return []
+    markers = list(_PAGE_MARKER.finditer(text))
+    if not markers:
+        return [(None, c) for c in chunk_text(text, chunk_size, overlap)]
+    out = []
+    for idx, m in enumerate(markers):
+        page = int(m.group(1))
+        start = m.end()
+        end = markers[idx + 1].start() if idx + 1 < len(markers) else len(text)
+        page_text = text[start:end].strip()
+        for c in chunk_text(page_text, chunk_size, overlap):
+            out.append((page, c))
+    return out
 
 
 def compute_dense_embedding(text: str) -> Optional[List[float]]:
@@ -379,7 +406,8 @@ def run_numeric_query(user: dict, intent: Dict[str, Any], document_id: Optional[
     answer = "Computed from structured records:\n- " + "\n- ".join(lines)
 
     sources = [
-        {"filename": fname, "document_id": did, "relevance_snippet": "structured production/dispatch record"}
+        {"filename": fname, "document_id": did, "page_number": None,
+         "page_citation": "Structured record (no page)", "relevance_snippet": "structured production/dispatch record"}
         for (did, fname) in contributing
     ]
 
@@ -398,9 +426,13 @@ def run_numeric_query(user: dict, intent: Dict[str, Any], document_id: Optional[
 @app.post("/index")
 def index_document(payload: IndexRequest):
     logger.info(f"Indexing document_id={payload.document_id} (kind={payload.source_kind}) for RAG")
-    chunks = chunk_text(payload.extracted_text)
-    if not chunks:
+    # Strip lone UTF-16 surrogates that OCR of scanned PDFs can emit — they are
+    # invalid UTF-8 and would break the Postgres insert / Qdrant payload.
+    clean = "".join(ch for ch in (payload.extracted_text or "") if not 0xD800 <= ord(ch) <= 0xDFFF)
+    paged = page_aware_chunks(clean)
+    if not paged:
         return {"status": "skipped", "chunks_indexed": 0}
+    pages_seen = sorted({p for p, _ in paged if p is not None})
 
     conn = get_db_connection()
     try:
@@ -409,24 +441,45 @@ def index_document(payload: IndexRequest):
             # Clear previous chunks for this document/report kind
             cur.execute("DELETE FROM vector_chunks WHERE document_id = %s AND doc_type = %s;", (payload.document_id, payload.doc_type))
 
-            for idx, chunk in enumerate(chunks):
+            for idx, (page, chunk) in enumerate(paged):
                 vec = compute_dense_embedding(chunk)
-                chunks_with_vecs.append((idx, chunk, vec))
+                chunks_with_vecs.append((idx, page, chunk, vec))
                 cur.execute(
                     """
-                    INSERT INTO vector_chunks (document_id, chunk_index, chunk_text, embedding, subsidiary, doc_type, topic)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                    INSERT INTO vector_chunks (document_id, chunk_index, chunk_text, embedding, subsidiary, doc_type, topic, page_number)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
                     """,
-                    (payload.document_id, idx, chunk, vec, payload.subsidiary, payload.doc_type, payload.topic)
+                    (payload.document_id, idx, chunk, vec, payload.subsidiary, payload.doc_type, payload.topic, page)
                 )
             conn.commit()
 
         # Primary vector store: Qdrant (Postgres above is the fallback copy).
         q_indexed = qdrant_index(payload.document_id, payload.doc_type, chunks_with_vecs,
                                  payload.subsidiary, payload.topic)
-        return {"status": "indexed", "chunks_indexed": len(chunks),
+        return {"status": "indexed", "chunks_indexed": len(paged),
+                "pages_indexed": len(pages_seen), "page_aware": bool(pages_seen),
                 "embeddings_generated": embedder is not None,
                 "qdrant_points": q_indexed, "vector_store": "qdrant" if _qdrant_ready else "postgres"}
+    finally:
+        conn.close()
+
+
+@app.post("/reindex/{document_id}")
+def reindex_document(document_id: str):
+    """Re-index a document from its stored OCR text (server-side, page-aware).
+    Reads text directly from Postgres so no re-OCR and no client encoding issues."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT original_filename, extracted_text, subsidiary, doc_type, topic_area FROM documents WHERE id = %s;", (document_id,))
+            d = cur.fetchone()
+        if not d or not d.get("extracted_text"):
+            raise HTTPException(status_code=404, detail="Document or extracted text not found")
+        req = IndexRequest(document_id=document_id, extracted_text=d["extracted_text"],
+                           subsidiary=d.get("subsidiary") or "CMPDI",
+                           doc_type=d.get("doc_type") or "report",
+                           topic=d.get("topic_area") or "general")
+        return index_document(req)
     finally:
         conn.close()
 
@@ -463,7 +516,7 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
         if candidates is None:
             vector_backend = "postgres"
             with conn.cursor() as cur:
-                sql = "SELECT document_id, chunk_index, chunk_text, embedding, subsidiary, doc_type FROM vector_chunks"
+                sql = "SELECT document_id, chunk_index, chunk_text, embedding, subsidiary, doc_type, page_number FROM vector_chunks"
                 params = []
                 if payload.document_id:
                     sql += " WHERE document_id = %s"
@@ -478,7 +531,7 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
                     sc = compute_tf_similarity(payload.query, r["chunk_text"])
                 candidates.append({"document_id": str(r["document_id"]), "chunk_index": r.get("chunk_index", 0),
                                    "chunk_text": r["chunk_text"], "subsidiary": r.get("subsidiary"),
-                                   "doc_type": r.get("doc_type"), "score": sc})
+                                   "doc_type": r.get("doc_type"), "page_number": r.get("page_number"), "score": sc})
 
         # Resolve filenames for candidate documents in one query.
         fnmap = {}
@@ -503,6 +556,7 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
                     "doc_id": str(c["document_id"]),
                     "filename": fnmap.get(str(c["document_id"]), "document"),
                     "chunk_index": c.get("chunk_index", 0),
+                    "page_number": c.get("page_number"),
                     "subsidiary": c.get("subsidiary"),
                     "doc_type": c.get("doc_type"),
                     "text": c["chunk_text"],
@@ -529,7 +583,9 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
 
         # Build Grounded LLM Prompt with Strict Isolation Instructions
         context_str = "\n\n".join([
-            f"[Source: {c['filename']} | Chunk: #{c['chunk_index']} | ID: {c['doc_id']}]\n{c['text']}"
+            f"[Source: {c['filename']}"
+            + (f" | Page {c['page_number']}" if c.get('page_number') else "")
+            + f" | Chunk #{c['chunk_index']} | ID: {c['doc_id']}]\n{c['text']}"
             for c in top_chunks
         ])
 
@@ -553,7 +609,9 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
                 "Answer the user's question using ONLY the authorized cross-document context below.\n\n"
                 "STRICT GROUNDING RULES:\n"
                 "1. Base your answer EXCLUSIVELY on facts explicitly stated in the context.\n"
-                "2. Clearly identify which specific document supplied each fact.\n"
+                "2. Clearly identify which specific document supplied each fact, citing the document name "
+                "and the Page number shown in the context (write 'Page N'). Only cite a page that appears "
+                "in the context; never invent a page number.\n"
                 "3. If the context does not contain enough information, respond exactly: "
                 "'I could not find sufficient evidence in the authorized documents to answer this question.'\n"
                 "4. Do NOT invent numbers, figures, or dates.\n\n"
@@ -589,10 +647,13 @@ async def query_rag(payload: QueryRequest, authorization: Optional[str] = Header
             if key not in seen:
                 seen.add(key)
                 snippet = c["text"][:180] + "..." if len(c["text"]) > 180 else c["text"]
+                page = c.get("page_number")
                 sources.append({
                     "filename": c["filename"],
                     "document_id": c["doc_id"],
                     "chunk_index": c["chunk_index"],
+                    "page_number": page,
+                    "page_citation": f"Page {page}" if page else "Page-level citation unavailable for this source",
                     "subsidiary": c["subsidiary"],
                     "relevance_snippet": snippet
                 })
