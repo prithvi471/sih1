@@ -364,6 +364,91 @@ def get_discrepancies(
         conn.close()
 
 
+@app.get("/analytics/topics/semantic")
+def semantic_topics(k: Optional[int] = None, authorization: Optional[str] = Header(None)):
+    """
+    Semantic topic modeling by clustering the document embeddings we already
+    store (SentenceTransformer vectors in vector_chunks), with representative
+    terms per cluster via TF-IDF. A lighter, stable alternative to BERTopic
+    that is appropriate for this corpus size. RBAC-filtered.
+    """
+    user = get_current_user(authorization)
+    try:
+        import numpy as np
+        from sklearn.cluster import KMeans
+        from sklearn.feature_extraction.text import TfidfVectorizer
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"topic-modeling libraries unavailable: {e}")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT v.document_id, v.embedding, d.original_filename, d.subsidiary,
+                       d.extracted_text
+                FROM vector_chunks v JOIN documents d ON v.document_id = d.id
+                WHERE v.embedding IS NOT NULL AND d.status != 'failed';
+            """)
+            rows = cur.fetchall()
+        # One mean embedding + concatenated text per authorized document.
+        docs = {}
+        for r in rows:
+            if not verify_document_access(user, r.get("subsidiary")):
+                continue
+            did = str(r["document_id"])
+            e = docs.setdefault(did, {"vecs": [], "text": "", "filename": r["original_filename"],
+                                      "subsidiary": r.get("subsidiary")})
+            if r["embedding"]:
+                e["vecs"].append(r["embedding"])
+            e["text"] += " " + (r.get("extracted_text") or "")[:2000]
+        docs = {d: v for d, v in docs.items() if v["vecs"]}
+        n = len(docs)
+        if n < 3:
+            return {"insufficient_data": True, "documents": n, "topics": []}
+
+        ids = list(docs.keys())
+        X = np.array([np.mean(docs[d]["vecs"], axis=0) for d in ids])
+        n_topics = k or max(2, min(6, n // 3))
+        labels = KMeans(n_clusters=n_topics, random_state=42, n_init=10).fit_predict(X)
+
+        # Representative terms per cluster via TF-IDF over that cluster's text.
+        texts = [docs[d]["text"] for d in ids]
+        tfidf = TfidfVectorizer(max_features=400, stop_words="english",
+                                token_pattern=r"[A-Za-z][A-Za-z]{2,}")
+        tf = tfidf.fit_transform(texts)
+        vocab = tfidf.get_feature_names_out()
+
+        # Years per document from structured_data.
+        with conn.cursor() as cur:
+            cur.execute("SELECT document_id, array_agg(DISTINCT report_year) yrs FROM structured_data WHERE report_year IS NOT NULL GROUP BY document_id;")
+            years = {str(r["document_id"]): [y for y in r["yrs"] if y] for r in cur.fetchall()}
+
+        topics = []
+        for c in range(n_topics):
+            members = [i for i, lab in enumerate(labels) if lab == c]
+            if not members:
+                continue
+            cluster_tf = np.asarray(tf[members].mean(axis=0)).ravel()
+            top_idx = cluster_tf.argsort()[::-1][:8]
+            terms = [vocab[i] for i in top_idx if cluster_tf[i] > 0]
+            subs = sorted({docs[ids[i]]["subsidiary"] for i in members if docs[ids[i]]["subsidiary"]})
+            yrs = sorted({y for i in members for y in years.get(ids[i], [])})
+            topics.append({
+                "topic_id": c,
+                "topic_name": ", ".join(terms[:3]).title() if terms else f"Topic {c}",
+                "representative_terms": terms,
+                "document_count": len(members),
+                "subsidiaries": subs,
+                "years": yrs,
+                "documents": [docs[ids[i]]["filename"] for i in members][:8],
+            })
+        topics.sort(key=lambda t: t["document_count"], reverse=True)
+        return {"method": "embedding-clustering (KMeans + TF-IDF)", "documents": n,
+                "topic_count": len(topics), "topics": topics}
+    finally:
+        conn.close()
+
+
 @app.get("/analytics/trends")
 def get_topic_trends(
     authorization: Optional[str] = Header(None)
