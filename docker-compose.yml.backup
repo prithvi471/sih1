@@ -50,27 +50,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Idempotent synthetic demo/test data. Safe to run repeatedly.
-  # The data is explicitly synthetic and is not official CIL data.
-  demo-seed:
-    image: postgres:16-alpine
-    container_name: mineiq-demo-seed
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:-mineiq_pass}
-    volumes:
-      - ./db/seed/demo_seed.sql:/seed/demo_seed.sql:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        until pg_isready -h postgres -U "${POSTGRES_USER:-mineiq}" -d "${POSTGRES_DB:-mineiq_docs}"; do
-          sleep 1
-        done
-        psql -h postgres -U "${POSTGRES_USER:-mineiq}" -d "${POSTGRES_DB:-mineiq_docs}" -v ON_ERROR_STOP=1 -f /seed/demo_seed.sql
-    restart: "no"
-
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: mineiq-rabbitmq
@@ -160,8 +139,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      demo-seed:
-        condition: service_completed_successfully
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 10s
@@ -214,8 +191,7 @@ services:
       test: [ "CMD", "ollama", "list" ]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 60s
+      retries: 5
 
   validation-service:
     build:
@@ -269,8 +245,6 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
-      demo-seed:
-        condition: service_completed_successfully
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 10s
@@ -380,8 +354,6 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-      demo-seed:
-        condition: service_completed_successfully
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 10s
@@ -409,8 +381,6 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-      demo-seed:
-        condition: service_completed_successfully
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 10s
@@ -435,8 +405,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      demo-seed:
-        condition: service_completed_successfully
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 10s

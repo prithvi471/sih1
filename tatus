@@ -1,0 +1,133 @@
+[35mDESIGN.md[m[36m:[m[32m233[m[36m:[m  * **Subsidiary Code**: Neutral slate background (`#F1F5F9`), slate text (`#334155`) with mono code (e.g. `[1;31mMCL[m`, `ECL`, `CMPDI`)
+[35mdb/init/004_mineiq_v2.sql[m[36m:[m[32m21[m[36m:[m-- 2. Create [1;31mstructured_data[m table for extracted domain metrics
+[35mdb/init/004_mineiq_v2.sql[m[36m:[m[32m22[m[36m:[mCREATE TABLE IF NOT EXISTS [1;31mstructured_data[m (
+[35mdb/init/004_mineiq_v2.sql[m[36m:[m[32m37[m[36m:[mCREATE INDEX IF NOT EXISTS idx_[1;31mstructured_data[m_doc ON [1;31mstructured_data[m(document_id);
+[35mdb/init/004_mineiq_v2.sql[m[36m:[m[32m38[m[36m:[mCREATE INDEX IF NOT EXISTS idx_[1;31mstructured_data[m_subsidiary ON [1;31mstructured_data[m(subsidiary);
+[35mdb/init/004_mineiq_v2.sql[m[36m:[m[32m97[m[36m:[m-- [1;31mSeed[m Demo Users
+[35mdb/init/004_mineiq_v2.sql[m[36m:[m[32m103[m[36m:[m('[1;31mmcl[m_officer', '[1;31mmcl[m123', '[1;31mMCL[m Subsidiary Officer', 'SUBSIDIARY_OFFICER', '[1;31mMCL[m'),
+[35mdb/init/005_auth_rbac.sql[m[36m:[m[32m4[m[36m:[m-- the plaintext demo passwords [1;31mseed[med in 004 on first startup.
+[35mfrontend/package-lock.json[m[36m:[m[32m343[m[36m:[m      "integrity": "sha512-c0uX9VAUBQ7dTDCjq+wdyGLowMdtR/GoC2U5IYk/7D1H1JYC0qseD7+11iMP2mRLN9RcCMRcjC4Y[1;31mMcl[mCzGwS/A==",
+[35mfrontend/package-lock.json[m[36m:[m[32m1530[m[36m:[m      "integrity": "sha512-gUu9hwfWvvEDBBmgtAowQCojwZmJ5[1;31mmcL[mn3aufeCsitijs3+f2NsrPtlAWIR6OPiqljl96GVCUbLe0HyqIpVaoA==",
+[35mfrontend/src/App.jsx[m[36m:[m[32m12[m[36m:[m  { username: '[1;31mmcl[m_officer',     role: 'SUBSIDIARY_OFFICER',name: '[1;31mMCL[m Officer ([1;31mMCL[m only)',   sub: '[1;31mMCL[m',  pw: '[1;31mmcl[m123'     },
+[35mfrontend/src/App.jsx[m[36m:[m[32m716[m[36m:[m                    {['ALL','[1;31mMCL[m','ECL','BCCL','CCL','WCL','SECL','NCL','CMPDI'].map(s => (
+[35mfrontend/src/App.jsx[m[36m:[m[32m871[m[36m:[m                    placeholder="e.g. What was [1;31mMCL[m production in [1;31m2025[m?"
+[35mfrontend/src/App.jsx[m[36m:[m[32m1068[m[36m:[m                      placeholder="e.g. Provide production and dispatch figures for [1;31mMCL[m, NCL and SECL for the last five years and explain major variations."
+[35mfrontend/src/App.jsx[m[36m:[m[32m1192[m[36m:[m                      {['[1;31mMCL[m','ECL','BCCL','CCL','WCL','SECL','NCL','CMPDI'].map(s => <option key={s} value={s}>{s}</option>)}
+[35mkeycloak/realm-export.json[m[36m:[m[32m56[m[36m:[m      "username": "kc_[1;31mmcl[m_officer",
+[35mkeycloak/realm-export.json[m[36m:[m[32m58[m[36m:[m      "firstName": "[1;31mMCL[m",
+[35mkeycloak/realm-export.json[m[36m:[m[32m60[m[36m:[m      "attributes": { "assigned_subsidiary": ["[1;31mMCL[m"] },
+[35mkeycloak/realm-export.json[m[36m:[m[32m61[m[36m:[m      "credentials": [{ "type": "password", "value": "[1;31mmcl[m123", "temporary": false }],
+[35mscratch/test_document_isolation.py[m[36m:[m[32m41[m[36m:[m    MAHANADI COALFIELDS LIMITED ([1;31mMCL[m)
+[35mscratch/test_document_isolation.py[m[36m:[m[32m42[m[36m:[m    ANNUAL COAL PRODUCTION & DISPATCH REPORT [1;31m2025[m
+[35mscratch/test_document_isolation.py[m[36m:[m[32m44[m[36m:[m    Subsidiary: [1;31mMCL[m
+[35mscratch/test_document_isolation.py[m[36m:[m[32m70[m[36m:[m        "subsidiary": "[1;31mMCL[m",
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m25[m[36m:[m    for username, role in [("admin", "ADMIN"), ("[1;31mmcl[m_officer", "SUBSIDIARY_OFFICER"), ("ecl_officer", "SUBSIDIARY_OFFICER")]:
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m36[m[36m:[m    [1;31mmcl[m_token = tokens.get("[1;31mmcl[m_officer")
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m39[m[36m:[m    if [1;31mmcl[m_token and admin_token:
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m42[m[36m:[m        r_[1;31mmcl[m = requests.get(f"{BASE_URL}/documents", headers={"Authorization": f"Bearer {[1;31mmcl[m_token}"})
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m44[m[36m:[m        print(f"  ✓ [1;31mMCL[m Officer restricted scope count: {len(r_[1;31mmcl[m.json()) if r_[1;31mmcl[m.status_code == 200 else 'N/A'}")
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m48[m[36m:[m    if [1;31mmcl[m_token:
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m51[m[36m:[m            json={"query": "What is the coal production target for [1;31mMCL[m?"},
+[35mscratch/test_mineiq_v2.py[m[36m:[m[32m52[m[36m:[m            headers={"Authorization": f"Bearer {[1;31mmcl[m_token}"}
+[35mscripts/test_e2e.py[m[36m:[m[32m46[m[36m:[m            required_tables = ["documents", "reports", "audit_logs", "[1;31mstructured_data[m", "domain_validations", "vector_chunks", "system_metrics", "users"]
+[35mscripts/test_e2e.py[m[36m:[m[32m62[m[36m:[m        [1;31mmcl[m_token = create_jwt_token("[1;31mmcl[m_officer", "SUBSIDIARY_OFFICER", "[1;31mMCL[m Officer", "[1;31mMCL[m")
+[35mscripts/test_e2e.py[m[36m:[m[32m63[m[36m:[m        decoded_[1;31mmcl[m = decode_jwt_token([1;31mmcl[m_token)
+[35mscripts/test_e2e.py[m[36m:[m[32m64[m[36m:[m        record("Security", "RBAC Role Payload Binding", decoded_[1;31mmcl[m["assigned_subsidiary"] == "[1;31mMCL[m", "Role & subsidiary bound to token")
+[35mscripts/test_e2e.py[m[36m:[m[32m71[m[36m:[m    user_[1;31mmcl[m = {"username": "[1;31mmcl[m_officer", "role": "SUBSIDIARY_OFFICER", "assigned_subsidiary": "[1;31mMCL[m"}
+[35mscripts/test_e2e.py[m[36m:[m[32m74[m[36m:[m    admin_can_[1;31mmcl[m = verify_document_access(user_admin, "[1;31mMCL[m")
+[35mscripts/test_e2e.py[m[36m:[m[32m75[m[36m:[m    [1;31mmcl[m_can_[1;31mmcl[m = verify_document_access(user_[1;31mmcl[m, "[1;31mMCL[m")
+[35mscripts/test_e2e.py[m[36m:[m[32m76[m[36m:[m    [1;31mmcl[m_can_ecl = verify_document_access(user_[1;31mmcl[m, "ECL")  # Should be False!
+[35mscripts/test_e2e.py[m[36m:[m[32m78[m[36m:[m    record("RBAC", "Admin Global Document Access", admin_can_[1;31mmcl[m, "Admin allowed cross-subsidiary access")
+[35mscripts/test_e2e.py[m[36m:[m[32m79[m[36m:[m    record("RBAC", "Authorized Subsidiary Access", [1;31mmcl[m_can_[1;31mmcl[m, "[1;31mMCL[m Officer allowed [1;31mMCL[m document access")
+[35mscripts/test_e2e.py[m[36m:[m[32m80[m[36m:[m    record("RBAC", "Unauthorized Access Boundary", not [1;31mmcl[m_can_ecl, "[1;31mMCL[m Officer DENIED ECL doc access (403 Forbidden)")
+[35mscripts/test_e2e.py[m[36m:[m[32m84[m[36m:[m    content1 = b"Sample CIL Mining Report Content [1;31m2025[m"
+[35mscripts/test_e2e.py[m[36m:[m[32m86[m[36m:[m    content2 = b"Sample CIL Mining Report Content [1;31m2025[m"
+[35mscripts/test_e2e.py[m[36m:[m[32m88[m[36m:[m    content3 = b"Modified CIL Mining Report Content [1;31m2025[m"
+[35mscripts/test_e2e.py[m[36m:[m[32m98[m[36m:[m        sample_txt = "Mine: Lakhanpur Open Cast Mine. Subsidiary: [1;31mMCL[m. Report Year: [1;31m2025[m. Actual Production: 54.1 MT. Target: 56.0 MT. Dispatch: 51.2 MT. Overburden: 12.4 MCuM."
+[35mscripts/test_e2e.py[m[36m:[m[32m101[m[36m:[m        has_sub = struct_res.get("subsidiary") == "[1;31mMCL[m"
+[35mservices/analytics-service/main.py[m[36m:[m[32m86[m[36m:[m             ("northern coalfields", "NCL"), ("mahanadi coalfields", "[1;31mMCL[m"),
+[35mservices/analytics-service/main.py[m[36m:[m[32m88[m[36m:[m_SUB_CODE_RE = re.compile(r'\b(ECL|BCCL|CCL|WCL|SECL|[1;31mMCL[m|NCL|CMPDI)\b')
+[35mservices/analytics-service/main.py[m[36m:[m[32m90[m[36m:[m    "[1;31mMCL[m": ["[1;31mMCL[m", "Mahanadi Coalfields Limited", "Mahanadi Coalfields Ltd."],
+[35mservices/analytics-service/main.py[m[36m:[m[32m99[m[36m:[m    """Resolve 'Mahanadi Coalfields Limited', '[1;31mMCL[m', 'ECL (Eastern...)' -> canonical code."""
+[35mservices/analytics-service/main.py[m[36m:[m[32m152[m[36m:[m            cur.execute("SELECT DISTINCT mine_name, subsidiary FROM [1;31mstructured_data[m WHERE mine_name IS NOT NULL AND subsidiary IS NOT NULL;")
+[35mservices/analytics-service/main.py[m[36m:[m[32m154[m[36m:[m            cur.execute("SELECT document_id, mine_name, subsidiary FROM [1;31mstructured_data[m WHERE mine_name IS NOT NULL;")
+[35mservices/analytics-service/main.py[m[36m:[m[32m318[m[36m:[m        # [1;31mSeed[m missing topics with 0 for nice UI graphs
+[35mservices/analytics-service/main.py[m[36m:[m[32m375[m[36m:[m                FROM [1;31mstructured_data[m s
+[35mservices/analytics-service/main.py[m[36m:[m[32m513[m[36m:[m        # Years per document from [1;31mstructured_data[m.
+[35mservices/analytics-service/main.py[m[36m:[m[32m515[m[36m:[m            cur.execute("SELECT document_id, array_agg(DISTINCT report_year) yrs FROM [1;31mstructured_data[m WHERE report_year IS NOT NULL GROUP BY document_id;")
+[35mservices/ingestion-service/main.py[m[36m:[m[32m104[m[36m:[m                CREATE TABLE IF NOT EXISTS [1;31mstructured_data[m (
+[35mservices/ingestion-service/main.py[m[36m:[m[32m191[m[36m:[m                ('[1;31mMCL[m', 'shared_drive', 'active'),
+[35mservices/ingestion-service/main.py[m[36m:[m[32m206[m[36m:[m                ('[1;31mmcl[m_officer', '[1;31mmcl[m123', '[1;31mMCL[m Subsidiary Officer', 'SUBSIDIARY_OFFICER', '[1;31mMCL[m'),
+[35mservices/ingestion-service/main.py[m[36m:[m[32m739[m[36m:[m                LEFT JOIN [1;31mstructured_data[m s ON d.id = s.document_id
+[35mservices/ingestion-service/main.py[m[36m:[m[32m773[m[36m:[m                FROM [1;31mstructured_data[m WHERE document_id = %s
+[35mservices/ingestion-service/main.py[m[36m:[m[32m1008[m[36m:[m        [1;31mstructured_data[m = {}
+[35mservices/ingestion-service/main.py[m[36m:[m[32m1021[m[36m:[m                    [1;31mstructured_data[m = ocr_data.get("[1;31mstructured_data[m", {})
+[35mservices/ingestion-service/main.py[m[36m:[m[32m1040[m[36m:[m        records_to_store = structured_records or ([[1;31mstructured_data[m] if [1;31mstructured_data[m else [])
+[35mservices/ingestion-service/main.py[m[36m:[m[32m1049[m[36m:[m                cur.execute("DELETE FROM [1;31mstructured_data[m WHERE document_id = %s;", (str(doc_uuid),))
+[35mservices/ingestion-service/main.py[m[36m:[m[32m1053[m[36m:[m                        INSERT INTO [1;31mstructured_data[m (document_id, mine_name, subsidiary, report_year, production_target_mt, actual_production_mt, dispatch_mt, overburden_mcum, raw_json)
+[35mservices/ingestion-service/main.py[m[36m:[m[32m1215[m[36m:[m                "mineiq_structured_records_total": one("SELECT COUNT(*)::int v FROM [1;31mstructured_data[m;"),
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m3[m[36m:[m  "note": "SYNTHETIC DEMONSTRATION DATA - expected values are ground truth for these [1;31mfixture[ms ONLY, not official CIL data. [1;31mFixture[m text is in the post-OCR format the extractor receives in production (spreadsheet cells joined by ' | ').",
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m7[m[36m:[m      "id": "[1;31mmcl[m_production_table_[1;31m2025[m",
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m8[m[36m:[m      "description": "Clean 3-mine [1;31mMCL[m production table (spreadsheet path)",
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m9[m[36m:[m      "text": "Mine | Subsidiary | Report Year | Production Target MT | Actual Production MT | Dispatch MT | Overburden MCuM\nLakhanpur Open Cast Mine | [1;31mMCL[m | [1;31m2025[m | 56.0 | 54.1 | 51.2 | 12.4\nAnanta Colliery | [1;31mMCL[m | [1;31m2025[m | 30.0 | 28.5 | 27.0 | 8.1\nKulda Mine | [1;31mMCL[m | [1;31m2025[m | 20.0 | 19.2 | 18.5 | 5.2",
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m11[m[36m:[m        {"mine_name": "Lakhanpur Open Cast Mine", "subsidiary": "[1;31mMCL[m", "report_year": [1;31m2025[m, "production_target_mt": 56.0, "actual_production_mt": 54.1, "dispatch_mt": 51.2, "overburden_mcum": 12.4},
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m12[m[36m:[m        {"mine_name": "Ananta Colliery", "subsidiary": "[1;31mMCL[m", "report_year": [1;31m2025[m, "production_target_mt": 30.0, "actual_production_mt": 28.5, "dispatch_mt": 27.0, "overburden_mcum": 8.1},
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m13[m[36m:[m        {"mine_name": "Kulda Mine", "subsidiary": "[1;31mMCL[m", "report_year": [1;31m2025[m, "production_target_mt": 20.0, "actual_production_mt": 19.2, "dispatch_mt": 18.5, "overburden_mcum": 5.2}
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m28[m[36m:[m      "text": "Annual review: Kulda Mine of [1;31mMCL[m recorded actual production 19.2 MT against a target 20.0 MT during 2024, with dispatch 18.5 MT.",
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m30[m[36m:[m        {"mine_name": "Kulda", "subsidiary": "[1;31mMCL[m", "report_year": 2024, "production_target_mt": 20.0, "actual_production_mt": 19.2, "dispatch_mt": 18.5}
+[35mservices/ocr-service/eval_benchmark.json[m[36m:[m[32m38[m[36m:[m        {"mine_name": "Bhubaneswari", "subsidiary": "[1;31mMCL[m", "report_year": 2023, "production_target_mt": 47.0, "actual_production_mt": 45.6}
+[35mservices/ocr-service/main.py[m[36m:[m[32m68[m[36m:[m    [1;31mstructured_data[m: Optional[dict] = None
+[35mservices/ocr-service/main.py[m[36m:[m[32m73[m[36m:[mSUBSIDIARY_RE = re.compile(r'\b(ECL|BCCL|CCL|WCL|SECL|[1;31mMCL[m|NCL|CMPDI)\b', re.IGNORECASE)
+[35mservices/ocr-service/main.py[m[36m:[m[32m84[m[36m:[m    ("mahanadi coalfields", "[1;31mMCL[m"),
+[35mservices/ocr-service/main.py[m[36m:[m[32m614[m[36m:[m            [1;31mstructured_data[m=struct_data,
+[35mservices/pq-service/main.py[m[36m:[m[32m36[m[36m:[mSUBSIDIARY_RE = re.compile(r'\b(ECL|BCCL|CCL|WCL|SECL|[1;31mMCL[m|NCL|CMPDI)\b', re.IGNORECASE)
+[35mservices/pq-service/main.py[m[36m:[m[32m40[m[36m:[m    ("northern coalfields", "NCL"), ("mahanadi coalfields", "[1;31mMCL[m"),
+[35mservices/pq-service/main.py[m[36m:[m[32m274[m[36m:[m    """Year-wise production/dispatch totals per subsidiary from [1;31mstructured_data[m (SQL, RBAC-filtered)."""
+[35mservices/pq-service/main.py[m[36m:[m[32m287[m[36m:[m        FROM [1;31mstructured_data[m
+[35mservices/rag-service/main.py[m[36m:[m[32m134[m[36m:[m_SUBSIDIARY_RE_Q = _re.compile(r'\b(ECL|BCCL|CCL|WCL|SECL|[1;31mMCL[m|NCL|CMPDI)\b', _re.IGNORECASE)
+[35mservices/rag-service/main.py[m[36m:[m[32m283[m[36m:[mSUBSIDIARY_RE = re.compile(r'\b(ECL|BCCL|CCL|WCL|SECL|[1;31mMCL[m|NCL|CMPDI)\b', re.IGNORECASE)
+[35mservices/rag-service/main.py[m[36m:[m[32m285[m[36m:[m# Query keyword -> [1;31mstructured_data[m column. "production" alone implies both
+[35mservices/rag-service/main.py[m[36m:[m[32m310[m[36m:[m    Decide whether a query should be answered from the [1;31mstructured_data[m table
+[35mservices/rag-service/main.py[m[36m:[m[32m360[m[36m:[m    Answer a numeric question from [1;31mstructured_data[m with server-side RBAC.
+[35mservices/rag-service/main.py[m[36m:[m[32m382[m[36m:[m        FROM [1;31mstructured_data[m s
+[35mservices/rag-service/main.py[m[36m:[m[32m522[m[36m:[m        # the [1;31mstructured_data[m table so figures come from real records (SQL),
+[35mservices/report-generation-worker/main.py[m[36m:[m[32m265[m[36m:[m                    FROM [1;31mstructured_data[m WHERE document_id = %s
+[35mservices/validation-service/main.py[m[36m:[m[32m190[m[36m:[m                    FROM [1;31mstructured_data[m WHERE document_id = %s;
+[35mservices/validation-service/main.py[m[36m:[m[32m208[m[36m:[m                        FROM [1;31mstructured_data[m s
+[35mtest-data/MCL_annual_report_2025.csv[m[36m:[m[32m2[m[36m:[mLakhanpur Open Cast Mine,[1;31mMCL[m,[1;31m2025[m,56.0,54.1,45.0,12.4
+[35mtest-data/MCL_annual_report_2025.csv[m[36m:[m[32m3[m[36m:[mAnanta Colliery,[1;31mMCL[m,[1;31m2025[m,30.0,28.5,27.0,8.1
+[35mtest-data/MCL_annual_report_2025.csv[m[36m:[m[32m4[m[36m:[mKulda Mine,[1;31mMCL[m,[1;31m2025[m,20.0,21.0,18.5,5.2
+[35mtest-data/geological_survey.txt[m[36m:[m[32m6[m[36m:[mReport Year: [1;31m2025[m
+[35mtest-data/production_data.csv[m[36m:[m[32m2[m[36m:[mLakhanpur Open Cast Mine,[1;31mMCL[m,[1;31m2025[m,56.0,54.1,51.2,12.4
+[35mtest-data/production_data.csv[m[36m:[m[32m3[m[36m:[mAnanta Colliery,[1;31mMCL[m,[1;31m2025[m,30.0,28.5,27.0,8.1
+[35mtest-data/production_data.csv[m[36m:[m[32m4[m[36m:[mKulda Mine,[1;31mMCL[m,[1;31m2025[m,20.0,19.2,18.5,5.2
+[35mtest-data/prompt_injection_test.txt[m[36m:[m[32m7[m[36m:[mReport Year: [1;31m2025[m
+[35mtests/conftest.py[m[36m:[m[32m2[m[36m:[mShared helpers + [1;31mfixture[ms for the MineIQ test suite.
+[35mtests/conftest.py[m[36m:[m[32m25[m[36m:[m    "[1;31mmcl[m_officer": "[1;31mmcl[m123",
+[35mtests/conftest.py[m[36m:[m[32m79[m[36m:[m@pytest.[1;31mfixture[m(scope="session")
+[35mtests/conftest.py[m[36m:[m[32m84[m[36m:[m@pytest.[1;31mfixture[m(scope="session")
+[35mtests/conftest.py[m[36m:[m[32m89[m[36m:[m@pytest.[1;31mfixture[m(scope="session")
+[35mtests/conftest.py[m[36m:[m[32m90[m[36m:[mdef [1;31mmcl[m():
+[35mtests/conftest.py[m[36m:[m[32m91[m[36m:[m    return login("[1;31mmcl[m_officer")
+[35mtests/conftest.py[m[36m:[m[32m94[m[36m:[m@pytest.[1;31mfixture[m(scope="session")
+[35mtests/test_auth_rbac.py[m[36m:[m[32m27[m[36m:[mdef test_subsidiary_officer_cannot_read_users([1;31mmcl[m):
+[35mtests/test_auth_rbac.py[m[36m:[m[32m28[m[36m:[m    st, _ = get(f"{ING}/auth/users", token=[1;31mmcl[m)
+[35mtests/test_graph.py[m[36m:[m[32m14[m[36m:[m    assert any(s["subsidiary"] == "[1;31mMCL[m" for s in o["subsidiaries"])
+[35mtests/test_graph.py[m[36m:[m[32m18[m[36m:[m    st, d = get(f"{ANALYTICS}/graph/subsidiary/[1;31mMCL[m", token=admin)
+[35mtests/test_graph.py[m[36m:[m[32m23[m[36m:[mdef test_graph_rbac_isolation(ecl, [1;31mmcl[m):
+[35mtests/test_graph.py[m[36m:[m[32m24[m[36m:[m    st, _ = get(f"{ANALYTICS}/graph/subsidiary/[1;31mMCL[m", token=ecl)
+[35mtests/test_graph.py[m[36m:[m[32m26[m[36m:[m    st, _ = get(f"{ANALYTICS}/graph/subsidiary/[1;31mMCL[m", token=[1;31mmcl[m)
+[35mtests/test_graph.py[m[36m:[m[32m30[m[36m:[mdef test_only_privileged_can_sync([1;31mmcl[m):
+[35mtests/test_graph.py[m[36m:[m[32m31[m[36m:[m    st, _ = post(f"{ANALYTICS}/graph/sync", token=[1;31mmcl[m)
+[35mtests/test_pq_copilot.py[m[36m:[m[32m7[m[36m:[m    q = ("Provide production and dispatch figures for [1;31mMCL[m, NCL and SECL for the "
+[35mtests/test_pq_copilot.py[m[36m:[m[32m17[m[36m:[m    assert set(d["subsidiaries"]) == {"[1;31mMCL[m", "NCL", "SECL"}
+[35mtests/test_pq_copilot.py[m[36m:[m[32m33[m[36m:[mdef test_subsidiary_officer_cannot_draft_or_approve(ministry, [1;31mmcl[m):
+[35mtests/test_pq_copilot.py[m[36m:[m[32m35[m[36m:[m    st, _ = post(f"{PQ}/api/parliament/questions/{pq['id']}/generate-draft", token=[1;31mmcl[m)
+[35mtests/test_pq_copilot.py[m[36m:[m[32m37[m[36m:[m    st, _ = post(f"{PQ}/api/parliament/questions/{pq['id']}/review", token=[1;31mmcl[m,
+[35mtests/test_rag_security.py[m[36m:[m[32m6[m[36m:[m    st, d = post(f"{RAG}/query", token=admin, body={"query": "What was [1;31mMCL[m production in [1;31m2025[m?"})
+[35mtests/test_rag_security.py[m[36m:[m[32m20[m[36m:[mdef test_isolation_ecl_cannot_read_[1;31mmcl[m_numeric(ecl):
+[35mtests/test_rag_security.py[m[36m:[m[32m21[m[36m:[m    st, d = post(f"{RAG}/query", token=ecl, body={"query": "What was [1;31mMCL[m production in [1;31m2025[m?"})
+[35mtests/test_rag_security.py[m[36m:[m[32m23[m[36m:[m    # ECL officer must not receive [1;31mMCL[m figures.
+[35mtests/test_rag_security.py[m[36m:[m[32m25[m[36m:[m    assert "[1;31mMCL[m" not in str(d.get("table", []))
+[35mtests/test_rag_security.py[m[36m:[m[32m47[m[36m:[m    # ECL officer sees no [1;31mMCL[m/NCL/SECL discrepancies.
+[35mtests/test_secret_scan.py[m[36m:[m[32m26[m[36m:[m    # mineiq_pass) are intentional [1;31mfixture[ms and are NOT matched here.

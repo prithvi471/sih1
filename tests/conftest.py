@@ -54,6 +54,37 @@ def post(url, token=None, body=None, **kw):
     return _req("POST", url, token, body, **kw)
 
 
+
+SERVICE_HEALTH_URLS = [ING, OCR, RAG, ANALYTICS, PQ]
+
+
+def _wait_for_services(timeout_seconds=150):
+    import time as _time
+    deadline = _time.time() + timeout_seconds
+    last_errors = {}
+    while _time.time() < deadline:
+        ready = True
+        for base in SERVICE_HEALTH_URLS:
+            try:
+                st, _ = _req("GET", f"{base}/health", timeout=5)
+                if st != 200:
+                    ready = False
+                    last_errors[base] = f"HTTP {st}"
+            except Exception as exc:
+                ready = False
+                last_errors[base] = str(exc)
+        if ready:
+            return
+        _time.sleep(2)
+    pytest.fail(f"MineIQ services did not become ready: {last_errors}")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def services_ready():
+    """Wait for Docker services (especially CPU Ollama startup) before logins/tests."""
+    _wait_for_services()
+
+
 def upload_csv(token, filename, content):
     import uuid as _uuid
     boundary = "----mineiqtest" + _uuid.uuid4().hex

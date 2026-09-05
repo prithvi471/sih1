@@ -139,3 +139,24 @@ curl -X POST "http://localhost:8000/process/9a991ae1-b629-463b-8a5e-f450fa2128e7
 > - Retrieval-Augmented Generation (RAG) vector search engine.
 > - Additional async workers: topic modeling worker & urgency triage worker.
 > - Notification service & API Gateway / Authentication layer.
+
+## Cross-platform Docker + deterministic demo fixtures
+
+The default Compose file does not require NVIDIA, AMD, Intel Arc, or any other GPU runtime. Ollama runs on CPU when a supported GPU is not exposed. GPU acceleration can be configured separately by a host-specific runtime without making the stack fail on machines that have no GPU.
+
+`demo-seed` is an idempotent synthetic dataset service. It populates MCL/NCL/SECL production records needed for graph, PQ, numeric-RAG and discrepancy demonstrations. The values are explicitly synthetic and are not official CIL data.
+
+Start the full stack:
+
+```bash
+docker compose up -d --build
+```
+
+Wait for the services to become healthy, then run the integration suite:
+
+```bash
+python -m pytest -q
+```
+
+The first Ollama startup can take longer on CPU-only machines; the Compose healthcheck and test bootstrap allow for that.
+
