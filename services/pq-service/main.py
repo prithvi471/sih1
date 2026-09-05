@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS parliamentary_responses (
     review_note TEXT, generated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_pq_responses_pq ON parliamentary_responses(pq_id);
+ALTER TABLE parliamentary_questions ADD COLUMN IF NOT EXISTS answer_text TEXT;
+ALTER TABLE parliamentary_questions ADD COLUMN IF NOT EXISTS session VARCHAR(50);
+ALTER TABLE parliamentary_questions ADD COLUMN IF NOT EXISTS source VARCHAR(200);
+ALTER TABLE parliamentary_questions ADD COLUMN IF NOT EXISTS source_url TEXT;
+ALTER TABLE parliamentary_questions ADD COLUMN IF NOT EXISTS is_historical BOOLEAN DEFAULT false;
 """
 
 
@@ -438,6 +443,115 @@ def review_pq(pq_id: str, body: ReviewBody, user: dict = Depends(require_permiss
                             "PQ_APPROVED" if decision == "APPROVED" else "PQ_REJECTED",
                             "pq-service", "SUCCESS", metadata={"pq_id": pq_id})
             return {"pq_id": pq_id, "status": decision, "reviewed_by": user["username"]}
+    finally:
+        conn.close()
+
+
+class HistoricalPQ(BaseModel):
+    """One historical Parliamentary Question + its official answer.
+
+    Expected input format for /api/parliament/historical/ingest is a JSON list
+    of these objects. Only question_text is required; unavailable fields should
+    be left null (never invented). Populate from legitimate public sources
+    (e.g. Lok Sabha / Rajya Sabha question archives, Ministry of Coal replies).
+    """
+    question_text: str
+    answer_text: Optional[str] = None
+    house: Optional[str] = None                # 'Lok Sabha' / 'Rajya Sabha'
+    session: Optional[str] = None
+    date: Optional[str] = None                 # YYYY-MM-DD
+    question_number: Optional[str] = None
+    subject: Optional[str] = None
+    ministry: Optional[str] = "Ministry of Coal"
+    member_name: Optional[str] = None
+    source: Optional[str] = None
+    source_url: Optional[str] = None
+
+
+@app.get("/api/parliament/historical/format")
+def historical_format():
+    """Documents the exact input the historical-PQ ingestion pipeline expects."""
+    return {
+        "endpoint": "POST /api/parliament/historical/ingest",
+        "body": "JSON array of records",
+        "record_schema": HistoricalPQ.model_json_schema().get("properties", {}),
+        "required": ["question_text"],
+        "notes": "Leave unavailable fields null. Do not fabricate. Use public "
+                 "Lok Sabha / Rajya Sabha / Ministry of Coal sources.",
+    }
+
+
+@app.post("/api/parliament/historical/ingest")
+def ingest_historical(records: List[HistoricalPQ], user: dict = Depends(require_permission("pq.write"))):
+    """Ingest real historical PQs (validated). Auto-analyzes entities per record."""
+    if not records:
+        return {"ingested": 0, "note": "empty payload"}
+    conn = get_db()
+    ingested = 0
+    try:
+        with conn.cursor() as cur:
+            for r in records:
+                a = analyze_question((r.question_text or "") + " " + (r.subject or ""))
+                yr = None
+                if r.date and len(r.date) >= 4 and r.date[:4].isdigit():
+                    yr = int(r.date[:4])
+                cur.execute(
+                    """
+                    INSERT INTO parliamentary_questions
+                        (pq_number, question_text, answer_text, house, session, member_name, ministry,
+                         subsidiaries, metrics, topics, period_from, period_to, source, source_url,
+                         is_historical, status, analysis, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,'HISTORICAL',%s,%s)
+                    ON CONFLICT (pq_number) DO NOTHING;
+                    """,
+                    (r.question_number, r.question_text, r.answer_text, r.house, r.session, r.member_name,
+                     r.ministry, a["subsidiaries"], a["metrics"], a["topics"], yr, yr, r.source, r.source_url,
+                     json.dumps(a), user["username"]),
+                )
+                ingested += 1
+            conn.commit()
+        log_audit_event(conn, user["username"], user["role"], "PQ_HISTORICAL_INGEST", "pq-service", "SUCCESS",
+                        metadata={"count": ingested})
+        return {"ingested": ingested}
+    finally:
+        conn.close()
+
+
+@app.get("/api/parliament/historical/search")
+def search_historical(q: Optional[str] = None, subsidiary: Optional[str] = None,
+                      year: Optional[int] = None, topic: Optional[str] = None,
+                      user: dict = Depends(require_permission("pq.read"))):
+    """Search the historical PQ corpus: keyword + subsidiary/year/topic filters."""
+    conn = get_db()
+    try:
+        where = ["is_historical = true"]
+        params: List[Any] = []
+        if q:
+            where.append("(question_text ILIKE %s OR answer_text ILIKE %s)")
+            params += [f"%{q}%", f"%{q}%"]
+        if subsidiary:
+            where.append("%s = ANY(subsidiaries)")
+            params.append(subsidiary.upper())
+        if year:
+            where.append("(period_from = %s OR period_to = %s)")
+            params += [year, year]
+        if topic:
+            where.append("%s = ANY(topics)")
+            params.append(topic)
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*)::int c FROM parliamentary_questions WHERE is_historical = true;")
+            corpus_size = cur.fetchone()["c"]
+            cur.execute(
+                f"SELECT pq_number, house, question_text, answer_text, subsidiaries, source, source_url "
+                f"FROM parliamentary_questions WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT 25;",
+                tuple(params))
+            rows = cur.fetchall()
+        return {
+            "corpus_size": corpus_size,
+            "corpus_status": "POPULATED" if corpus_size else "MISSING - REAL DATASET REQUIRED",
+            "results": rows,
+            "count": len(rows),
+        }
     finally:
         conn.close()
 
