@@ -577,7 +577,12 @@ def extract_text(payload: ExtractRequest):
     ext = payload.s3_key.lower().split('.')[-1] if '.' in payload.s3_key else ''
 
     try:
-        if source_type == 'pdf' or ext == 'pdf':
+        if ext in ['txt', 'text', 'md', 'log', 'rtf']:
+            # Plain-text documents: decode directly (checked before the pdf
+            # branch because such files default to source_type 'pdf').
+            text = file_bytes.decode('utf-8', errors='ignore')
+            method, pages = 'text_direct', 1
+        elif source_type == 'pdf' or ext == 'pdf':
             text, method, pages = parse_pdf(file_bytes)
         elif source_type in ['image', 'png', 'jpg', 'jpeg'] or ext in ['png', 'jpg', 'jpeg', 'tiff', 'bmp', 'webp']:
             text, method, pages = parse_image(file_bytes)

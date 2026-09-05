@@ -80,6 +80,65 @@ def get_graph():
     return _neo_driver
 
 
+# --- Entity extraction + normalization (Phase 3) ---
+_SUB_FULL = [("south eastern coalfields", "SECL"), ("eastern coalfields", "ECL"),
+             ("western coalfields", "WCL"), ("central coalfields", "CCL"),
+             ("northern coalfields", "NCL"), ("mahanadi coalfields", "MCL"),
+             ("bharat coking coal", "BCCL"), ("central mine planning", "CMPDI")]
+_SUB_CODE_RE = re.compile(r'\b(ECL|BCCL|CCL|WCL|SECL|MCL|NCL|CMPDI)\b')
+_SUB_ALIASES = {
+    "MCL": ["MCL", "Mahanadi Coalfields Limited", "Mahanadi Coalfields Ltd."],
+    "ECL": ["ECL", "Eastern Coalfields Limited"], "NCL": ["NCL", "Northern Coalfields Limited"],
+    "SECL": ["SECL", "South Eastern Coalfields Limited"], "WCL": ["WCL", "Western Coalfields Limited"],
+    "CCL": ["CCL", "Central Coalfields Limited"], "BCCL": ["BCCL", "Bharat Coking Coal Limited"],
+    "CMPDI": ["CMPDI", "Central Mine Planning and Design Institute"],
+}
+
+
+def canon_subsidiary(raw):
+    """Resolve 'Mahanadi Coalfields Limited', 'MCL', 'ECL (Eastern...)' -> canonical code."""
+    if not raw:
+        return None
+    low = raw.lower()
+    for phrase, code in _SUB_FULL:
+        if phrase in low:
+            return code
+    m = _SUB_CODE_RE.search(raw.upper())
+    return m.group(1) if m else raw.strip().upper()
+
+
+def extract_entities(text):
+    """Domain-aware generic entity extraction -> list of (type, canonical, mention)."""
+    if not text:
+        return []
+    ents, low = [], text.lower()
+    for phrase, code in _SUB_FULL:
+        if phrase in low:
+            ents.append(("Subsidiary", code, phrase))
+    for m in _SUB_CODE_RE.finditer(text.upper()):
+        ents.append(("Subsidiary", m.group(1), m.group(1)))
+    for m in re.finditer(r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+Coalfield', text):
+        ents.append(("Coalfield", m.group(1) + " Coalfield", m.group(0)))
+    for c in ["lignite", "coking coal", "non-coking coal", "coal"]:
+        if c in low:
+            ents.append(("Commodity", c.title(), c))
+    for m in re.finditer(r'\bG-?(\d{1,2})\b', text):
+        ents.append(("CoalGrade", "G-" + m.group(1), m.group(0)))
+    for m in re.finditer(r'(\d+(?:\.\d+)?)\s*(Million\s+Tonnes|MT|MCuM|meters|metres)\b', text, re.IGNORECASE):
+        ents.append(("Quantity", m.group(0).strip(), m.group(0).strip()))
+    for m in re.finditer(r'\b(20[12]\d)\b', text):
+        ents.append(("Year", m.group(1), m.group(1)))
+    for metric in ["production", "dispatch", "offtake", "overburden", "reserve", "exploration", "borehole", "seam"]:
+        if metric in low:
+            ents.append(("Concept", metric.title(), metric))
+    seen, out = set(), []
+    for t, c, mention in ents:
+        if (t, c) not in seen:
+            seen.add((t, c))
+            out.append((t, c, mention))
+    return out
+
+
 def graph_sync():
     """(Re)build the knowledge graph from PostgreSQL. Idempotent via MERGE."""
     drv = get_graph()
@@ -88,7 +147,7 @@ def graph_sync():
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, original_filename, subsidiary, doc_type, topic_area FROM documents WHERE status != 'failed';")
+            cur.execute("SELECT id, original_filename, subsidiary, doc_type, topic_area, extracted_text FROM documents WHERE status != 'failed';")
             docs = cur.fetchall()
             cur.execute("SELECT DISTINCT mine_name, subsidiary FROM structured_data WHERE mine_name IS NOT NULL AND subsidiary IS NOT NULL;")
             mines = cur.fetchall()
@@ -99,38 +158,71 @@ def graph_sync():
                 pqs = cur.fetchall()
             except Exception:
                 pqs = []
+            # Canonical entity store in PostgreSQL (spec 11).
+            cur.execute("""CREATE TABLE IF NOT EXISTS entities (
+                id SERIAL PRIMARY KEY, canonical_name VARCHAR(200) NOT NULL, entity_type VARCHAR(50) NOT NULL,
+                aliases TEXT[] DEFAULT '{}', UNIQUE(canonical_name, entity_type));""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS document_entities (
+                document_id UUID, entity_id INT REFERENCES entities(id) ON DELETE CASCADE,
+                mention TEXT, UNIQUE(document_id, entity_id));""")
+            conn.commit()
+
+        counts = {"subsidiaries": 0, "mines": 0, "documents": 0, "pqs": 0, "entities": 0, "mentions": 0}
+        with drv.session() as s:
+            # Full rebuild so canonicalization removes stale/duplicate nodes
+            # (e.g. an old "WESTERN COALFIELDS LIMITED (WCL)" collapses to "WCL").
+            s.run("MATCH (n) DETACH DELETE n")
+            for m in mines:
+                sub = canon_subsidiary(m["subsidiary"])
+                s.run("MERGE (sub:Subsidiary {name:$sub}) MERGE (mine:Mine {name:$mine, subsidiary:$sub}) "
+                      "MERGE (sub)-[:OPERATES]->(mine)", sub=sub, mine=m["mine_name"])
+                counts["mines"] += 1
+            counts["subsidiaries"] = len({canon_subsidiary(m["subsidiary"]) for m in mines} |
+                                         {canon_subsidiary(d["subsidiary"]) for d in docs if d.get("subsidiary")})
+            entity_ids = {}
+            for d in docs:
+                did = str(d["id"])
+                sub = canon_subsidiary(d.get("subsidiary"))
+                s.run("MERGE (doc:Document {id:$id}) SET doc.filename=$fn, doc.doc_type=$dt", id=did, fn=d["original_filename"], dt=d.get("doc_type"))
+                if sub and sub not in ("UNKNOWN", "UNCLASSIFIED"):
+                    s.run("MERGE (sub:Subsidiary {name:$sub}) WITH sub MATCH (doc:Document {id:$id}) MERGE (doc)-[:BELONGS_TO]->(sub)", sub=sub, id=did)
+                if d.get("topic_area"):
+                    s.run("MERGE (t:Topic {name:$t}) WITH t MATCH (doc:Document {id:$id}) MERGE (doc)-[:HAS_TOPIC]->(t)", t=d["topic_area"], id=did)
+                counts["documents"] += 1
+
+                # Generic entity extraction -> Neo4j Entity + MENTIONS, and Postgres.
+                for etype, canonical, mention in extract_entities(d.get("extracted_text") or ""):
+                    aliases = _SUB_ALIASES.get(canonical, []) if etype == "Subsidiary" else []
+                    s.run("MERGE (e:Entity {name:$n, type:$t}) SET e.aliases=$a "
+                          "WITH e MATCH (doc:Document {id:$id}) MERGE (doc)-[:MENTIONS]->(e)",
+                          n=canonical, t=etype, a=aliases, id=did)
+                    key = (canonical, etype)
+                    if key not in entity_ids:
+                        with conn.cursor() as c2:
+                            c2.execute("INSERT INTO entities (canonical_name, entity_type, aliases) VALUES (%s,%s,%s) "
+                                       "ON CONFLICT (canonical_name, entity_type) DO UPDATE SET aliases=EXCLUDED.aliases RETURNING id;",
+                                       (canonical, etype, aliases))
+                            entity_ids[key] = c2.fetchone()["id"]
+                        counts["entities"] += 1
+                    with conn.cursor() as c2:
+                        c2.execute("INSERT INTO document_entities (document_id, entity_id, mention) VALUES (%s,%s,%s) "
+                                   "ON CONFLICT DO NOTHING;", (did, entity_ids[key], mention))
+                    counts["mentions"] += 1
+                conn.commit()
+
+            for dm in doc_mine:
+                s.run("MATCH (doc:Document {id:$id}) MATCH (mine:Mine {name:$mine, subsidiary:$sub}) MERGE (doc)-[:ABOUT]->(mine)",
+                      id=str(dm["document_id"]), mine=dm["mine_name"], sub=canon_subsidiary(dm["subsidiary"]))
+            for q in pqs:
+                s.run("MERGE (pq:PQ {id:$id}) SET pq.number=$num", id=str(q["id"]), num=q.get("pq_number"))
+                for sub in (q.get("subsidiaries") or []):
+                    s.run("MERGE (sub:Subsidiary {name:$sub}) WITH sub MATCH (pq:PQ {id:$id}) MERGE (pq)-[:CONCERNS]->(sub)", sub=canon_subsidiary(sub), id=str(q["id"]))
+                for t in (q.get("topics") or []):
+                    s.run("MERGE (t:Topic {name:$t}) WITH t MATCH (pq:PQ {id:$id}) MERGE (pq)-[:RELATED_TO]->(t)", t=t, id=str(q["id"]))
+                counts["pqs"] += 1
+        return counts
     finally:
         conn.close()
-
-    counts = {"subsidiaries": 0, "mines": 0, "documents": 0, "pqs": 0}
-    with drv.session() as s:
-        for m in mines:
-            s.run("MERGE (sub:Subsidiary {name:$sub}) "
-                  "MERGE (mine:Mine {name:$mine, subsidiary:$sub}) "
-                  "MERGE (sub)-[:OPERATES]->(mine)",
-                  sub=m["subsidiary"].upper(), mine=m["mine_name"])
-            counts["mines"] += 1
-        subs = {m["subsidiary"].upper() for m in mines} | {d["subsidiary"].upper() for d in docs if d.get("subsidiary")}
-        counts["subsidiaries"] = len(subs)
-        for d in docs:
-            sub = (d.get("subsidiary") or "").upper()
-            s.run("MERGE (doc:Document {id:$id}) SET doc.filename=$fn, doc.doc_type=$dt", id=str(d["id"]), fn=d["original_filename"], dt=d.get("doc_type"))
-            if sub:
-                s.run("MERGE (sub:Subsidiary {name:$sub}) WITH sub MATCH (doc:Document {id:$id}) MERGE (doc)-[:BELONGS_TO]->(sub)", sub=sub, id=str(d["id"]))
-            if d.get("topic_area"):
-                s.run("MERGE (t:Topic {name:$t}) WITH t MATCH (doc:Document {id:$id}) MERGE (doc)-[:HAS_TOPIC]->(t)", t=d["topic_area"], id=str(d["id"]))
-            counts["documents"] += 1
-        for dm in doc_mine:
-            s.run("MATCH (doc:Document {id:$id}) MATCH (mine:Mine {name:$mine, subsidiary:$sub}) MERGE (doc)-[:ABOUT]->(mine)",
-                  id=str(dm["document_id"]), mine=dm["mine_name"], sub=(dm["subsidiary"] or "").upper())
-        for q in pqs:
-            s.run("MERGE (pq:PQ {id:$id}) SET pq.number=$num", id=str(q["id"]), num=q.get("pq_number"))
-            for sub in (q.get("subsidiaries") or []):
-                s.run("MERGE (sub:Subsidiary {name:$sub}) WITH sub MATCH (pq:PQ {id:$id}) MERGE (pq)-[:CONCERNS]->(sub)", sub=sub.upper(), id=str(q["id"]))
-            for t in (q.get("topics") or []):
-                s.run("MERGE (t:Topic {name:$t}) WITH t MATCH (pq:PQ {id:$id}) MERGE (pq)-[:RELATED_TO]->(t)", t=t, id=str(q["id"]))
-            counts["pqs"] += 1
-    return counts
 
 
 @app.get("/health")
@@ -449,6 +541,31 @@ def graph_overview(authorization: Optional[str] = Header(None)):
     subs = [r for r in rows if verify_document_access(user, r["subsidiary"])]
     return {"nodes": totals, "relationships": rels, "subsidiaries": subs,
             "authorized_scope": user.get("assigned_subsidiary") or "ALL"}
+
+
+@app.get("/graph/entities")
+def graph_entities(authorization: Optional[str] = Header(None)):
+    """Entities extracted from the corpus (canonical name, type, aliases, mention count)."""
+    get_current_user(authorization)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT e.canonical_name, e.entity_type, e.aliases,
+                       COUNT(de.document_id)::int AS mentions
+                FROM entities e LEFT JOIN document_entities de ON e.id = de.entity_id
+                GROUP BY e.id, e.canonical_name, e.entity_type, e.aliases
+                ORDER BY mentions DESC, e.entity_type;
+            """)
+            rows = cur.fetchall()
+            by_type = {}
+            for r in rows:
+                by_type[r["entity_type"]] = by_type.get(r["entity_type"], 0) + 1
+            return {"total": len(rows), "by_type": by_type,
+                    "entities": [{"name": r["canonical_name"], "type": r["entity_type"],
+                                  "aliases": r["aliases"], "mentions": r["mentions"]} for r in rows[:60]]}
+    finally:
+        conn.close()
 
 
 @app.get("/graph/subsidiary/{name}")
